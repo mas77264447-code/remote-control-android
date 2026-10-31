@@ -16,7 +16,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -94,7 +93,6 @@ fun HomeScreen() {
     var received by remember { mutableStateOf("لا رسائل بعد") }
     var inCall by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
-    // مصدر البث الذي ينتظر إذناً: "screen" أو "front" أو "back"
     var pendingKind by remember { mutableStateOf("") }
 
     val link = remember(deviceId) {
@@ -186,6 +184,7 @@ fun HomeScreen() {
     }
 
     if (fullScreen) {
+        // وضع ملء الشاشة: النافذة تُعرض هنا فقط
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -221,6 +220,7 @@ fun HomeScreen() {
         return
     }
 
+    // الواجهة الرئيسية: لا تعرض النافذة إلا عندما لا تكون في وضع ملء الشاشة
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -240,14 +240,6 @@ fun HomeScreen() {
                 Text("عرض الشاشة كاملة")
             }
         }
-
-        AndroidView(
-            factory = { renderer },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(vertical = 8.dp)
-        )
 
         incomingFrom?.let { from ->
             Text(text = "طلب اتصال من الجهاز $from")
@@ -300,7 +292,6 @@ fun HomeScreen() {
                 Button(onClick = {
                     pendingKind = "front"
                     if (needsNotificationPermission(context)) {
-                        pendingKind = ""
                         notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     } else if (!hasPermission(context, Manifest.permission.CAMERA)) {
                         cameraLauncher.launch(Manifest.permission.CAMERA)
@@ -314,7 +305,6 @@ fun HomeScreen() {
                 Button(onClick = {
                     pendingKind = "back"
                     if (needsNotificationPermission(context)) {
-                        pendingKind = ""
                         notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     } else if (!hasPermission(context, Manifest.permission.CAMERA)) {
                         cameraLauncher.launch(Manifest.permission.CAMERA)
