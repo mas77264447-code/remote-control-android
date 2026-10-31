@@ -162,15 +162,10 @@ fun HomeScreen() {
             deviceId = deviceId,
             onStatus = { status = it },
             onIncoming = { from, src ->
-                // إذن محفوظ لهذا الجهاز والمصدر: يبدأ تلقائياً مع إشعار واضح
+                incomingFrom = from
+                incomingSource = src
                 if (TrustedDevices.allows(from, src)) {
-                    incomingFrom = from
-                    incomingSource = src
-                    status = "طلب من $from بإذن محفوظ، بدأ البث"
-                    pendingAutoStart = Pair(from, src)
-                } else {
-                    incomingFrom = from
-                    incomingSource = src
+                    status = "طلب من $from بإذن محفوظ، اضغط موافقة للبدء"
                 }
             },
             onCallResult = { from, accepted ->
