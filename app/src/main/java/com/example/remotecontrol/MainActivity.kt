@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -46,6 +48,8 @@ const val SERVER_URL = "wss://signaling-server-xp4s.onrender.com"
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TrustedDevices.init(this)
+        WebRtcManager.init(this)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -63,14 +67,20 @@ fun HomeScreen() {
     var status by remember { mutableStateOf("جارٍ الاتصال...") }
     var sharing by remember { mutableStateOf(false) }
     var captureInfo by remember { mutableStateOf("لم تُلتقط الشاشة بعد") }
-    var incoming by remember { mutableStateOf("") }
+    var incomingFrom by remember { mutableStateOf<String?>(null) }
+    var trusted by remember { mutableStateOf(TrustedDevices.all().toList().sorted()) }
     var targetId by remember { mutableStateOf("") }
+    var rtcState by remember { mutableStateOf("لم تبدأ بعد") }
+    var received by remember { mutableStateOf("لا رسائل بعد") }
 
     val client = remember(deviceId) {
         connectToServer(
             deviceId = deviceId,
             onStatus = { status = it },
-            onCallRequest = { from -> incoming = "طلب اتصال من الجهاز $from" }
+            onIncoming = { from -> incomingFrom = from },
+            onCallResult = { from, accepted ->
+                status = if (accepted) "وافق الجهاز $from على الاتصال" else "رفض الجهاز $from الاتصال"
+            }
         )
     }
 
@@ -84,9 +94,13 @@ fun HomeScreen() {
             sharing = false
             captureInfo = "توقفت المشاركة"
         }
+        WebRtcManager.onState = { rtcState = it }
+        WebRtcManager.onText = { received = it }
         onDispose {
             ScreenShareService.onFrameCaptured = null
             ScreenShareService.onStopped = null
+            WebRtcManager.onState = null
+            WebRtcManager.onText = null
         }
     }
 
@@ -118,7 +132,8 @@ fun HomeScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -126,8 +141,34 @@ fun HomeScreen() {
         Text(text = status)
         Text(text = if (sharing) "الشاشة مُشارَكة الآن" else "الشاشة غير مُشارَكة")
         Text(text = captureInfo)
-        if (incoming.isNotEmpty()) {
-            Text(text = incoming)
+        Text(text = "حالة WebRTC: $rtcState")
+        Text(text = "رسالة مستلمة: $received")
+
+        incomingFrom?.let { from ->
+            Text(text = "طلب اتصال من الجهاز $from")
+            Button(onClick = {
+                sendSignal(client, from, "call_accept")
+                incomingFrom = null
+                status = "قبلت الاتصال من $from"
+            }) {
+                Text("قبول مرة واحدة")
+            }
+            Button(onClick = {
+                TrustedDevices.add(from)
+                trusted = TrustedDevices.all().toList().sorted()
+                sendSignal(client, from, "call_accept")
+                incomingFrom = null
+                status = "أُضيف $from إلى الأجهزة الموثوقة"
+            }) {
+                Text("قبول دائم")
+            }
+            Button(onClick = {
+                sendSignal(client, from, "call_reject")
+                incomingFrom = null
+                status = "رفضت الاتصال من $from"
+            }) {
+                Text("رفض")
+            }
         }
 
         if (!sharing) {
@@ -182,22 +223,52 @@ fun HomeScreen() {
                 status = "غير متصل بالخادم"
                 return@Button
             }
-            val payload = JSONObject()
-                .put("type", "signal")
-                .put("to", target)
-                .put("data", JSONObject().put("kind", "call_request"))
-            client.send(payload.toString())
+            sendSignal(client, target, "call_request")
             status = "أُرسل طلب اتصال إلى $target"
         }) {
             Text("الاتصال بجهاز")
         }
+
+        Button(onClick = {
+            if (!WebRtcManager.sendText("مرحباً من $deviceId")) {
+                rtcState = "القناة غير مفتوحة بعد"
+            }
+        }) {
+            Text("إرسال رسالة تجريبية")
+        }
+
+        if (trusted.isNotEmpty()) {
+            Text(text = "الأجهزة الموثوقة:", modifier = Modifier.padding(top = 16.dp))
+            trusted.forEach { id ->
+                Button(onClick = {
+                    TrustedDevices.remove(id)
+                    trusted = TrustedDevices.all().toList().sorted()
+                }) {
+                    Text("حذف $id")
+                }
+            }
+        }
     }
+}
+
+fun sendRaw(client: WebSocketClient, to: String, data: JSONObject) {
+    if (!client.isOpen) return
+    val payload = JSONObject()
+        .put("type", "signal")
+        .put("to", to)
+        .put("data", data)
+    client.send(payload.toString())
+}
+
+fun sendSignal(client: WebSocketClient, to: String, kind: String) {
+    sendRaw(client, to, JSONObject().put("kind", kind))
 }
 
 fun connectToServer(
     deviceId: String,
     onStatus: (String) -> Unit,
-    onCallRequest: (String) -> Unit
+    onIncoming: (String) -> Unit,
+    onCallResult: (String, Boolean) -> Unit
 ): WebSocketClient {
     val mainHandler = Handler(Looper.getMainLooper())
 
@@ -217,9 +288,22 @@ fun connectToServer(
             when (json.optString("type")) {
                 "signal" -> {
                     val from = json.optString("from")
-                    val kind = json.optJSONObject("data")?.optString("kind")
-                    if (kind == "call_request") {
-                        mainHandler.post { onCallRequest(from) }
+                    val data = json.optJSONObject("data") ?: return
+                    when (data.optString("kind")) {
+                        "sdp", "ice" -> WebRtcManager.handleSignal(from, data)
+                        "call_request" -> {
+                            if (TrustedDevices.contains(from)) {
+                                sendSignal(this, from, "call_accept")
+                                mainHandler.post { onStatus("قُبل تلقائياً طلب الجهاز الموثوق $from") }
+                            } else {
+                                mainHandler.post { onIncoming(from) }
+                            }
+                        }
+                        "call_accept" -> {
+                            WebRtcManager.startAsCaller(from)
+                            mainHandler.post { onCallResult(from, true) }
+                        }
+                        "call_reject" -> mainHandler.post { onCallResult(from, false) }
                     }
                 }
                 "error" -> mainHandler.post { onStatus(json.optString("message")) }
@@ -235,5 +319,6 @@ fun connectToServer(
         }
     }
     client.connect()
+    WebRtcManager.sender = { to, data -> sendRaw(client, to, data) }
     return client
 }
