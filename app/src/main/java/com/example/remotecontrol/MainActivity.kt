@@ -1,8 +1,14 @@
 package com.example.remotecontrol
 
+import android.app.Activity
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
@@ -41,11 +48,27 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun HomeScreen() {
+    val context = LocalContext.current
     val deviceId = remember { Random.nextInt(100000, 999999).toString() }
     var status by remember { mutableStateOf("جارٍ الاتصال...") }
+    var sharing by remember { mutableStateOf(false) }
 
     remember(deviceId) {
         connectToServer(deviceId) { newStatus -> status = newStatus }
+    }
+
+    val projectionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val intent = Intent(context, ScreenShareService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+            sharing = true
+        }
     }
 
     Column(
@@ -57,7 +80,11 @@ fun HomeScreen() {
     ) {
         Text(text = "معرّف هذا الجهاز: $deviceId")
         Text(text = status)
-        Button(onClick = { /* لاحقاً: بدء المشاركة */ }) {
+        Text(text = if (sharing) "الشاشة مُشارَكة الآن" else "الشاشة غير مُشارَكة")
+        Button(onClick = {
+            val manager = context.getSystemService(MediaProjectionManager::class.java)
+            projectionLauncher.launch(manager.createScreenCaptureIntent())
+        }) {
             Text("مشاركة الشاشة")
         }
         Button(onClick = { /* لاحقاً: الاتصال بجهاز */ }) {
