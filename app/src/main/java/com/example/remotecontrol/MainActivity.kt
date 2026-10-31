@@ -76,8 +76,8 @@ fun HomeScreen() {
     var inCall by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
 
-    val client = remember(deviceId) {
-        connectToServer(
+    val link = remember(deviceId) {
+        ServerLink(
             deviceId = deviceId,
             onStatus = { status = it },
             onIncoming = { from -> incomingFrom = from },
@@ -91,8 +91,9 @@ fun HomeScreen() {
         )
     }
 
-    DisposableEffect(client) {
-        onDispose { client.close() }
+    DisposableEffect(link) {
+        link.start()
+        onDispose { link.stop() }
     }
 
     DisposableEffect(Unit) {
@@ -206,7 +207,7 @@ fun HomeScreen() {
         incomingFrom?.let { from ->
             Text(text = "طلب اتصال من الجهاز $from")
             Button(onClick = {
-                sendSignal(client, from, "call_accept")
+                link.send(from, "call_accept")
                 incomingFrom = null
                 status = "قبلت الاتصال من $from"
                 inCall = true
@@ -217,7 +218,7 @@ fun HomeScreen() {
             Button(onClick = {
                 TrustedDevices.add(from)
                 trusted = TrustedDevices.all().toList().sorted()
-                sendSignal(client, from, "call_accept")
+                link.send(from, "call_accept")
                 incomingFrom = null
                 status = "أُضيف $from إلى الأجهزة الموثوقة"
                 inCall = true
@@ -226,7 +227,7 @@ fun HomeScreen() {
                 Text("قبول دائم")
             }
             Button(onClick = {
-                sendSignal(client, from, "call_reject")
+                link.send(from, "call_reject")
                 incomingFrom = null
                 status = "رفضت الاتصال من $from"
             }) {
@@ -287,11 +288,11 @@ fun HomeScreen() {
                 status = "لا يمكن الاتصال بنفس الجهاز"
                 return@Button
             }
-            if (!client.isOpen) {
+            if (!link.isConnected()) {
                 status = "غير متصل بالخادم"
                 return@Button
             }
-            sendSignal(client, target, "call_request")
+            link.send(target, "call_request")
             status = "أُرسل طلب اتصال إلى $target"
         }) {
             Text("الاتصال بجهاز")
@@ -319,86 +320,104 @@ fun HomeScreen() {
     }
 }
 
-fun sendRaw(client: WebSocketClient, to: String, data: JSONObject) {
-    if (!client.isOpen) return
-    val payload = JSONObject()
-        .put("type", "signal")
-        .put("to", to)
-        .put("data", data)
-    client.send(payload.toString())
-}
+// يدير الاتصال بالخادم: يحتفظ بمرجع واحد، ويعيد الاتصال تلقائياً عند الانقطاع
+class ServerLink(
+    private val deviceId: String,
+    private val onStatus: (String) -> Unit,
+    private val onIncoming: (String) -> Unit,
+    private val onCallResult: (String, Boolean) -> Unit
+) {
+    private val main = Handler(Looper.getMainLooper())
+    private var socket: WebSocketClient? = null
+    private var running = false
 
-fun sendSignal(client: WebSocketClient, to: String, kind: String) {
-    sendRaw(client, to, JSONObject().put("kind", kind))
-}
-
-fun connectToServer(
-    deviceId: String,
-    onStatus: (String) -> Unit,
-    onIncoming: (String) -> Unit,
-    onCallResult: (String, Boolean) -> Unit
-): WebSocketClient {
-    val mainHandler = Handler(Looper.getMainLooper())
-    lateinit var client: WebSocketClient
-
-    fun build(): WebSocketClient = object : WebSocketClient(URI(SERVER_URL)) {
-        override fun onOpen(handshake: ServerHandshake?) {
-            send(JSONObject().put("type", "register").put("id", deviceId).toString())
-            mainHandler.post { onStatus("متصل بالخادم") }
-        }
-
-        override fun onMessage(message: String?) {
-            if (message == null) return
-            val json = try {
-                JSONObject(message)
-            } catch (e: Exception) {
-                return
-            }
-            when (json.optString("type")) {
-                "signal" -> {
-                    val from = json.optString("from")
-                    val data = json.optJSONObject("data") ?: return
-                    when (data.optString("kind")) {
-                        "sdp", "ice" -> WebRtcManager.handleSignal(from, data)
-                        "call_request" -> {
-                            if (TrustedDevices.contains(from)) {
-                                sendSignal(this, from, "call_accept")
-                                mainHandler.post { onStatus("قُبل تلقائياً طلب الجهاز الموثوق $from") }
-                            } else {
-                                mainHandler.post { onIncoming(from) }
-                            }
-                        }
-                        "call_accept" -> {
-                            WebRtcManager.startAsCaller(from)
-                            mainHandler.post { onCallResult(from, true) }
-                        }
-                        "call_reject" -> mainHandler.post { onCallResult(from, false) }
-                    }
-                }
-                "error" -> mainHandler.post { onStatus(json.optString("message")) }
-            }
-        }
-
-        override fun onClose(code: Int, reason: String?, remote: Boolean) {
-            mainHandler.post { onStatus("انقطع الاتصال، جارٍ إعادة المحاولة...") }
-            mainHandler.postDelayed({ reconnect() }, 3000)
-        }
-
-        override fun onError(ex: Exception?) {
-            mainHandler.post { onStatus("خطأ في الاتصال") }
-        }
+    fun start() {
+        running = true
+        open()
+        WebRtcManager.sender = { to, data -> sendRaw(to, data) }
     }
 
-    fun reconnect() {
+    fun stop() {
+        running = false
+        socket?.close()
+        socket = null
+    }
+
+    fun isConnected(): Boolean = socket?.isOpen == true
+
+    fun send(to: String, kind: String) {
+        sendRaw(to, JSONObject().put("kind", kind))
+    }
+
+    private fun sendRaw(to: String, data: JSONObject) {
+        val s = socket ?: return
+        if (!s.isOpen) return
+        val payload = JSONObject()
+            .put("type", "signal")
+            .put("to", to)
+            .put("data", data)
+        s.send(payload.toString())
+    }
+
+    private fun open() {
+        if (!running) return
+        val s = object : WebSocketClient(URI(SERVER_URL)) {
+            override fun onOpen(handshake: ServerHandshake?) {
+                send(JSONObject().put("type", "register").put("id", deviceId).toString())
+                main.post { onStatus("متصل بالخادم") }
+            }
+
+            override fun onMessage(message: String?) {
+                handleMessage(message)
+            }
+
+            override fun onClose(code: Int, reason: String?, remote: Boolean) {
+                main.post { onStatus("انقطع الاتصال، جارٍ إعادة المحاولة...") }
+                scheduleReconnect()
+            }
+
+            override fun onError(ex: Exception?) {
+                main.post { onStatus("خطأ في الاتصال") }
+            }
+        }
+        socket = s
         try {
-            client = build()
-            client.connect()
-            WebRtcManager.sender = { to, data -> sendRaw(client, to, data) }
+            s.connect()
         } catch (e: Exception) {
-            mainHandler.postDelayed({ reconnect() }, 3000)
+            scheduleReconnect()
         }
     }
 
-    reconnect()
-    return object : WebSocketClient(URI("ws://localhost")) {}.let { client }
+    private fun scheduleReconnect() {
+        if (!running) return
+        main.postDelayed({ open() }, 3000)
+    }
+
+    private fun handleMessage(message: String?) {
+        if (message == null) return
+        val json = try {
+            JSONObject(message)
+        } catch (e: Exception) {
+            return
+        }
+        if (json.optString("type") != "signal") return
+        val from = json.optString("from")
+        val data = json.optJSONObject("data") ?: return
+        when (data.optString("kind")) {
+            "sdp", "ice" -> WebRtcManager.handleSignal(from, data)
+            "call_request" -> {
+                if (TrustedDevices.contains(from)) {
+                    send(from, "call_accept")
+                    main.post { onStatus("قُبل تلقائياً طلب الجهاز الموثوق $from") }
+                } else {
+                    main.post { onIncoming(from) }
+                }
+            }
+            "call_accept" -> {
+                WebRtcManager.startAsCaller(from)
+                main.post { onCallResult(from, true) }
+            }
+            "call_reject" -> main.post { onCallResult(from, false) }
+        }
+    }
 }
