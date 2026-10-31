@@ -15,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -73,6 +74,8 @@ fun HomeScreen() {
     var targetId by remember { mutableStateOf("") }
     var rtcState by remember { mutableStateOf("لم تبدأ بعد") }
     var received by remember { mutableStateOf("لا رسائل بعد") }
+    var inCall by remember { mutableStateOf(false) }
+    var fullScreen by remember { mutableStateOf(false) }
 
     val client = remember(deviceId) {
         connectToServer(
@@ -81,6 +84,10 @@ fun HomeScreen() {
             onIncoming = { from -> incomingFrom = from },
             onCallResult = { from, accepted ->
                 status = if (accepted) "وافق الجهاز $from على الاتصال" else "رفض الجهاز $from الاتصال"
+                if (accepted) {
+                    inCall = true
+                    fullScreen = true
+                }
             }
         )
     }
@@ -134,6 +141,42 @@ fun HomeScreen() {
         projectionLauncher.launch(manager.createScreenCaptureIntent())
     }
 
+    if (fullScreen) {
+        // شاشة الفيديو الكاملة: تبقى كما هي حتى يضغط المستخدم رجوع أو إنهاء
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Button(onClick = { fullScreen = false }) {
+                    Text("رجوع")
+                }
+                Button(onClick = {
+                    WebRtcManager.close()
+                    inCall = false
+                    fullScreen = false
+                    status = "أُنهي الاتصال"
+                }) {
+                    Text("إنهاء الاتصال")
+                }
+            }
+            AndroidView(
+                factory = { renderer },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+            Text(text = "حالة WebRTC: $rtcState")
+        }
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -148,12 +191,17 @@ fun HomeScreen() {
         Text(text = "حالة WebRTC: $rtcState")
         Text(text = "رسالة مستلمة: $received")
 
-        // نافذة الفيديو تأخذ المساحة المتبقية كلها
+        if (inCall) {
+            Button(onClick = { fullScreen = true }, modifier = Modifier.padding(top = 8.dp)) {
+                Text("عرض الشاشة كاملة")
+            }
+        }
+
         AndroidView(
             factory = { renderer },
             modifier = Modifier
-                .weight(1f)
                 .fillMaxWidth()
+                .weight(1f)
                 .padding(vertical = 8.dp)
         )
 
@@ -163,6 +211,8 @@ fun HomeScreen() {
                 sendSignal(client, from, "call_accept")
                 incomingFrom = null
                 status = "قبلت الاتصال من $from"
+                inCall = true
+                fullScreen = true
             }) {
                 Text("قبول مرة واحدة")
             }
@@ -172,6 +222,8 @@ fun HomeScreen() {
                 sendSignal(client, from, "call_accept")
                 incomingFrom = null
                 status = "أُضيف $from إلى الأجهزة الموثوقة"
+                inCall = true
+                fullScreen = true
             }) {
                 Text("قبول دائم")
             }
