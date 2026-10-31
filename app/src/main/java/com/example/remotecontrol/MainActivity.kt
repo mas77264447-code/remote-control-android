@@ -113,7 +113,6 @@ fun HomeScreen() {
         }
     }
 
-    // نافذة فيديو واحدة فقط، تبقى في مكانها ولا تُنقل
     val renderer = remember { SurfaceViewRenderer(context) }
     DisposableEffect(renderer) {
         WebRtcManager.attachRenderer(renderer)
@@ -145,171 +144,174 @@ fun HomeScreen() {
         projectionLauncher.launch(manager.createScreenCaptureIntent())
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // الواجهة الرئيسية
+    if (fullScreen) {
+        // وضع ملء الشاشة: النافذة تُعرض هنا فقط، ولا تظهر في الواجهة الرئيسية
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.Top,
+                .background(Color.Black)
+                .padding(8.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(text = "معرّف هذا الجهاز: $deviceId")
-            Text(text = status)
-            Text(text = if (sharing) "الشاشة مُشارَكة الآن" else "الشاشة غير مُشارَكة")
-            Text(text = captureInfo)
-            Text(text = "حالة WebRTC: $rtcState")
-            Text(text = "رسالة مستلمة: $received")
-
-            if (inCall) {
-                Button(onClick = { fullScreen = true }, modifier = Modifier.padding(top = 8.dp)) {
-                    Text("عرض الشاشة كاملة")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Button(onClick = { fullScreen = false }) {
+                    Text("رجوع")
+                }
+                Button(onClick = {
+                    WebRtcManager.close()
+                    inCall = false
+                    fullScreen = false
+                    status = "أُنهي الاتصال"
+                }) {
+                    Text("إنهاء الاتصال")
                 }
             }
-
-            incomingFrom?.let { from ->
-                Text(text = "طلب اتصال من الجهاز $from")
-                Button(onClick = {
-                    link.send(from, "call_accept")
-                    incomingFrom = null
-                    status = "قبلت الاتصال من $from"
-                    inCall = true
-                    fullScreen = true
-                }) {
-                    Text("قبول مرة واحدة")
-                }
-                Button(onClick = {
-                    TrustedDevices.add(from)
-                    trusted = TrustedDevices.all().toList().sorted()
-                    link.send(from, "call_accept")
-                    incomingFrom = null
-                    status = "أُضيف $from إلى الأجهزة الموثوقة"
-                    inCall = true
-                    fullScreen = true
-                }) {
-                    Text("قبول دائم")
-                }
-                Button(onClick = {
-                    link.send(from, "call_reject")
-                    incomingFrom = null
-                    status = "رفضت الاتصال من $from"
-                }) {
-                    Text("رفض")
-                }
-            }
-
-            if (!sharing) {
-                Button(onClick = {
-                    val needsNotificationPermission = Build.VERSION.SDK_INT >= 33 &&
-                        ContextCompat.checkSelfPermission(
-                            context, Manifest.permission.POST_NOTIFICATIONS
-                        ) != PackageManager.PERMISSION_GRANTED
-
-                    if (needsNotificationPermission) {
-                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else {
-                        val manager = context.getSystemService(MediaProjectionManager::class.java)
-                        projectionLauncher.launch(manager.createScreenCaptureIntent())
-                    }
-                }) {
-                    Text("مشاركة الشاشة")
-                }
-            } else {
-                Button(onClick = {
-                    val stopIntent = Intent(context, ScreenShareService::class.java).apply {
-                        action = ScreenShareService.ACTION_STOP
-                    }
-                    context.startService(stopIntent)
-                    sharing = false
-                    captureInfo = "توقفت المشاركة"
-                }) {
-                    Text("إيقاف المشاركة")
-                }
-            }
-
-            OutlinedTextField(
-                value = targetId,
-                onValueChange = { input -> targetId = input.filter { it.isDigit() }.take(6) },
-                label = { Text("معرّف الجهاز الآخر") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                modifier = Modifier.padding(top = 8.dp)
+            AndroidView(
+                factory = { renderer },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
             )
+            Text(text = "حالة WebRTC: $rtcState", color = Color.White)
+        }
+        return
+    }
 
-            Button(onClick = {
-                val target = targetId.trim()
-                if (target.isEmpty()) {
-                    status = "أدخل معرّف الجهاز الآخر أولاً"
-                    return@Button
-                }
-                if (target == deviceId) {
-                    status = "لا يمكن الاتصال بنفس الجهاز"
-                    return@Button
-                }
-                if (!link.isConnected()) {
-                    status = "غير متصل بالخادم"
-                    return@Button
-                }
-                link.send(target, "call_request")
-                status = "أُرسل طلب اتصال إلى $target"
-            }) {
-                Text("الاتصال بجهاز")
-            }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.Top,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(text = "معرّف هذا الجهاز: $deviceId")
+        Text(text = status)
+        Text(text = if (sharing) "الشاشة مُشارَكة الآن" else "الشاشة غير مُشارَكة")
+        Text(text = captureInfo)
+        Text(text = "حالة WebRTC: $rtcState")
+        Text(text = "رسالة مستلمة: $received")
 
-            Button(onClick = {
-                if (!WebRtcManager.sendText("مرحباً من $deviceId")) {
-                    rtcState = "القناة غير مفتوحة بعد"
-                }
-            }) {
-                Text("إرسال رسالة تجريبية")
-            }
-
-            if (trusted.isNotEmpty()) {
-                Text(text = "الأجهزة الموثوقة:", modifier = Modifier.padding(top = 8.dp))
-                trusted.forEach { id ->
-                    Button(onClick = {
-                        TrustedDevices.remove(id)
-                        trusted = TrustedDevices.all().toList().sorted()
-                    }) {
-                        Text("حذف $id")
-                    }
-                }
+        if (inCall) {
+            Button(onClick = { fullScreen = true }, modifier = Modifier.padding(top = 8.dp)) {
+                Text("عرض الشاشة كاملة")
             }
         }
 
-        // شاشة الفيديو الكاملة: طبقة فوق الواجهة الرئيسية، والفيديو نفسه في مكان واحد
-        if (fullScreen) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black)
-                    .padding(8.dp),
-                verticalArrangement = Arrangement.SpaceBetween,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Button(onClick = { fullScreen = false }) {
-                        Text("رجوع")
-                    }
-                    Button(onClick = {
-                        WebRtcManager.close()
-                        inCall = false
-                        fullScreen = false
-                        status = "أُنهي الاتصال"
-                    }) {
-                        Text("إنهاء الاتصال")
-                    }
+        incomingFrom?.let { from ->
+            Text(text = "طلب اتصال من الجهاز $from")
+            Button(onClick = {
+                link.send(from, "call_accept")
+                incomingFrom = null
+                status = "قبلت الاتصال من $from"
+                inCall = true
+                fullScreen = true
+            }) {
+                Text("قبول مرة واحدة")
+            }
+            Button(onClick = {
+                TrustedDevices.add(from)
+                trusted = TrustedDevices.all().toList().sorted()
+                link.send(from, "call_accept")
+                incomingFrom = null
+                status = "أُضيف $from إلى الأجهزة الموثوقة"
+                inCall = true
+                fullScreen = true
+            }) {
+                Text("قبول دائم")
+            }
+            Button(onClick = {
+                link.send(from, "call_reject")
+                incomingFrom = null
+                status = "رفضت الاتصال من $from"
+            }) {
+                Text("رفض")
+            }
+        }
+
+        if (!sharing) {
+            Button(onClick = {
+                val needsNotificationPermission = Build.VERSION.SDK_INT >= 33 &&
+                    ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
+
+                if (needsNotificationPermission) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    val manager = context.getSystemService(MediaProjectionManager::class.java)
+                    projectionLauncher.launch(manager.createScreenCaptureIntent())
                 }
-                Text(text = "حالة WebRTC: $rtcState", color = Color.White)
+            }) {
+                Text("مشاركة الشاشة")
+            }
+        } else {
+            Button(onClick = {
+                val stopIntent = Intent(context, ScreenShareService::class.java).apply {
+                    action = ScreenShareService.ACTION_STOP
+                }
+                context.startService(stopIntent)
+                sharing = false
+                captureInfo = "توقفت المشاركة"
+            }) {
+                Text("إيقاف المشاركة")
+            }
+        }
+
+        OutlinedTextField(
+            value = targetId,
+            onValueChange = { input -> targetId = input.filter { it.isDigit() }.take(6) },
+            label = { Text("معرّف الجهاز الآخر") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+
+        Button(onClick = {
+            val target = targetId.trim()
+            if (target.isEmpty()) {
+                status = "أدخل معرّف الجهاز الآخر أولاً"
+                return@Button
+            }
+            if (target == deviceId) {
+                status = "لا يمكن الاتصال بنفس الجهاز"
+                return@Button
+            }
+            if (!link.isConnected()) {
+                status = "غير متصل بالخادم"
+                return@Button
+            }
+            link.send(target, "call_request")
+            status = "أُرسل طلب اتصال إلى $target"
+        }) {
+            Text("الاتصال بجهاز")
+        }
+
+        Button(onClick = {
+            if (!WebRtcManager.sendText("مرحباً من $deviceId")) {
+                rtcState = "القناة غير مفتوحة بعد"
+            }
+        }) {
+            Text("إرسال رسالة تجريبية")
+        }
+
+        if (trusted.isNotEmpty()) {
+            Text(text = "الأجهزة الموثوقة:", modifier = Modifier.padding(top = 8.dp))
+            trusted.forEach { id ->
+                Button(onClick = {
+                    TrustedDevices.remove(id)
+                    trusted = TrustedDevices.all().toList().sorted()
+                }) {
+                    Text("حذف $id")
+                }
             }
         }
     }
 }
 
-// يدير الاتصال بالخادم: يحتفظ بمرجع واحد، ويعيد الاتصال تلقائياً عند الانقطاع
 class ServerLink(
     private val deviceId: String,
     private val onStatus: (String) -> Unit,
