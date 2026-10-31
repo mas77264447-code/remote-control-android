@@ -110,6 +110,7 @@ fun HomeScreen() {
         }
     }
 
+    // نافذة واحدة فقط للفيديو، تُعرض في مكان واحد في كل لحظة
     val renderer = remember { SurfaceViewRenderer(context) }
     DisposableEffect(renderer) {
         WebRtcManager.attachRenderer(renderer)
@@ -142,7 +143,6 @@ fun HomeScreen() {
     }
 
     if (fullScreen) {
-        // شاشة الفيديو الكاملة: تبقى كما هي حتى يضغط المستخدم رجوع أو إنهاء
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -167,7 +167,7 @@ fun HomeScreen() {
                 }
             }
             AndroidView(
-                factory = { renderer },
+                factory = { ctx -> (renderer.parent as? android.view.ViewGroup)?.removeView(renderer); renderer },
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
@@ -196,14 +196,6 @@ fun HomeScreen() {
                 Text("عرض الشاشة كاملة")
             }
         }
-
-        AndroidView(
-            factory = { renderer },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(vertical = 8.dp)
-        )
 
         incomingFrom?.let { from ->
             Text(text = "طلب اتصال من الجهاز $from")
