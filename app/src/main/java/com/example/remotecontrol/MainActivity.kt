@@ -50,7 +50,6 @@ import kotlin.random.Random
 
 const val SERVER_URL = "wss://signaling-server-xp4s.onrender.com"
 
-// أنواع المصادر التي يمكن أن يطلبها المتحكم
 const val SRC_SCREEN = "screen"
 const val SRC_FRONT = "front"
 const val SRC_BACK = "back"
@@ -104,11 +103,9 @@ fun HomeScreen() {
     var inCall by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
 
-    // طلب وارد من جهاز آخر: المعرّف ونوع المصدر المطلوب
     var incomingFrom by remember { mutableStateOf<String?>(null) }
     var incomingSource by remember { mutableStateOf(SRC_SCREEN) }
 
-    // المصدر الذي ينتظر إذن النظام قبل بدء البث
     var pendingSource by remember { mutableStateOf("") }
 
     val link = remember(deviceId) {
@@ -154,25 +151,7 @@ fun HomeScreen() {
         onDispose { WebRtcManager.detachRenderer(renderer) }
     }
 
-    // يبدأ المصدر المطلوب على هذا الجهاز بعد موافقة المستخدم
-    fun startSource(src: String) {
-        if (src == SRC_SCREEN) {
-            // الشاشة تحتاج إذن النظام أولاً، والنتيجة تأتي في projectionLauncher
-            pendingSource = SRC_SCREEN
-            val manager = context.getSystemService(MediaProjectionManager::class.java)
-            projectionLauncher.launch(manager.createScreenCaptureIntent())
-        } else {
-            val front = src == SRC_FRONT
-            val intent = Intent(context, ScreenShareService::class.java).apply {
-                putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_CAMERA)
-                putExtra(ScreenShareService.EXTRA_FRONT, front)
-            }
-            startCaptureService(context, intent)
-            sharing = true
-            captureInfo = if (front) "الكاميرا الأمامية تعمل" else "الكاميرا الخلفية تعمل"
-        }
-    }
-
+    // المشغّلات تُعرَّف أولاً لأن الدوال أدناه تستخدمها
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -197,7 +176,7 @@ fun HomeScreen() {
         val src = pendingSource
         pendingSource = ""
         if (granted && src.isNotEmpty()) {
-            startSource(src)
+            startSourceNow(context, src, { sharing = it }, { captureInfo = it }, projectionLauncher, { pendingSource = it })
         } else {
             status = "لم يُمنح إذن الكاميرا"
         }
@@ -208,10 +187,11 @@ fun HomeScreen() {
     ) { _ ->
         val src = pendingSource
         pendingSource = ""
-        if (src.isNotEmpty()) startSource(src)
+        if (src.isNotEmpty()) {
+            startSourceNow(context, src, { sharing = it }, { captureInfo = it }, projectionLauncher, { pendingSource = it })
+        }
     }
 
-    // يطلب الإذن المناسب ثم يبدأ المصدر
     fun requestAndStart(src: String) {
         if (needsNotificationPermission(context)) {
             pendingSource = src
@@ -223,7 +203,7 @@ fun HomeScreen() {
             cameraLauncher.launch(Manifest.permission.CAMERA)
             return
         }
-        startSource(src)
+        startSourceNow(context, src, { sharing = it }, { captureInfo = it }, projectionLauncher, { pendingSource = it })
     }
 
     if (fullScreen) {
@@ -282,7 +262,6 @@ fun HomeScreen() {
             }
         }
 
-        // بطاقة الطلب الوارد: المستقبِل يختار ويبدأ بنفسه
         incomingFrom?.let { from ->
             Text(text = "يطلب الجهاز $from: ${sourceLabel(incomingSource)}")
             Button(onClick = {
@@ -384,7 +363,31 @@ fun HomeScreen() {
     }
 }
 
-// يرسل طلب اتصال مع نوع المصدر المطلوب
+// يبدأ المصدر على هذا الجهاز بعد أن تكون الأذونات جاهزة
+private fun startSourceNow(
+    context: Context,
+    src: String,
+    setSharing: (Boolean) -> Unit,
+    setCaptureInfo: (String) -> Unit,
+    projectionLauncher: androidx.activity.result.ActivityResultLauncher<Intent>,
+    setPending: (String) -> Unit
+) {
+    if (src == SRC_SCREEN) {
+        setPending(SRC_SCREEN)
+        val manager = context.getSystemService(MediaProjectionManager::class.java)
+        projectionLauncher.launch(manager.createScreenCaptureIntent())
+    } else {
+        val front = src == SRC_FRONT
+        val intent = Intent(context, ScreenShareService::class.java).apply {
+            putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_CAMERA)
+            putExtra(ScreenShareService.EXTRA_FRONT, front)
+        }
+        startCaptureService(context, intent)
+        setSharing(true)
+        setCaptureInfo(if (front) "الكاميرا الأمامية تعمل" else "الكاميرا الخلفية تعمل")
+    }
+}
+
 fun requestCall(
     link: ServerLink,
     deviceId: String,
@@ -437,7 +440,6 @@ class ServerLink(
         sendRaw(to, JSONObject().put("kind", kind))
     }
 
-    // طلب يحمل نوع المصدر المطلوب من المستقبِل
     fun sendRequest(to: String, src: String) {
         sendRaw(to, JSONObject().put("kind", "call_request").put("src", src))
     }
@@ -500,12 +502,7 @@ class ServerLink(
             "sdp", "ice" -> WebRtcManager.handleSignal(from, data)
             "call_request" -> {
                 val src = data.optString("src", SRC_SCREEN)
-                if (TrustedDevices.contains(from)) {
-                    // الموثوق يُظهر البطاقة نفسها، ويبقى البدء بضغطة المستخدم
-                    main.post { onIncoming(from, src) }
-                } else {
-                    main.post { onIncoming(from, src) }
-                }
+                main.post { onIncoming(from, src) }
             }
             "call_accept" -> {
                 WebRtcManager.startAsCaller(from)
