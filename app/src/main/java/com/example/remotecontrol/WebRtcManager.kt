@@ -1,17 +1,29 @@
 package com.example.remotecontrol
 
 import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.Looper
 import org.json.JSONObject
 import org.webrtc.DataChannel
+import org.webrtc.DefaultVideoDecoderFactory
+import org.webrtc.DefaultVideoEncoderFactory
+import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
+import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RtpTransceiver
+import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import org.webrtc.SurfaceTextureHelper
+import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoSource
+import org.webrtc.VideoTrack
 import java.nio.ByteBuffer
 
 private class Sdp(
@@ -40,8 +52,10 @@ object WebRtcManager {
     var sender: ((String, JSONObject) -> Unit)? = null
     var onState: ((String) -> Unit)? = null
     var onText: ((String) -> Unit)? = null
+    var onScreenStopped: (() -> Unit)? = null
 
     private val main = Handler(Looper.getMainLooper())
+    private var eglBase: EglBase? = null
     private var factory: PeerConnectionFactory? = null
     private var pc: PeerConnection? = null
     private var channel: DataChannel? = null
@@ -51,19 +65,84 @@ object WebRtcManager {
     private val pendingOutIce = mutableListOf<JSONObject>()
     private val pendingInIce = mutableListOf<IceCandidate>()
 
+    private var localSource: VideoSource? = null
+    private var localTrack: VideoTrack? = null
+    private var localCapturer: ScreenCapturerAndroid? = null
+    private var localHelper: SurfaceTextureHelper? = null
+    private var remoteTrack: VideoTrack? = null
+    private var remoteRenderer: SurfaceViewRenderer? = null
+
+    val isSharing: Boolean get() = localCapturer != null
+
     fun init(context: Context) {
         if (factory != null) return
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(context.applicationContext)
                 .createInitializationOptions()
         )
-        factory = PeerConnectionFactory.builder().createPeerConnectionFactory()
+        val egl = EglBase.create()
+        eglBase = egl
+        factory = PeerConnectionFactory.builder()
+            .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
+            .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
+            .createPeerConnectionFactory()
     }
 
-    // يبدأ الاتصال من الجهة التي أرسلت الطلب، وتنشئ قناة البيانات وتُرسل العرض
+    // يبدأ التقاط الشاشة ويجهّز مسار الفيديو الذي يُرسَل عند الاتصال
+    fun startScreen(context: Context, data: Intent) {
+        init(context)
+        stopScreen()
+        val egl = eglBase ?: return
+        val f = factory ?: return
+        val helper = SurfaceTextureHelper.create("ScreenCapture", egl.eglBaseContext)
+        val source = f.createVideoSource(true)
+        val capturer = ScreenCapturerAndroid(data, object : MediaProjection.Callback() {
+            override fun onStop() {
+                stopScreen()
+                main.post { onScreenStopped?.invoke() }
+            }
+        })
+        capturer.initialize(helper, context.applicationContext, source.capturerObserver)
+        val m = context.resources.displayMetrics
+        capturer.startCapture(m.widthPixels / 2, m.heightPixels / 2, 15)
+        localSource = source
+        localTrack = f.createVideoTrack("screen0", source)
+        localCapturer = capturer
+        localHelper = helper
+    }
+
+    fun stopScreen() {
+        try {
+            localCapturer?.stopCapture()
+        } catch (e: Exception) {
+        }
+        localCapturer?.dispose()
+        localHelper?.dispose()
+        localCapturer = null
+        localHelper = null
+        localTrack = null
+        localSource = null
+    }
+
+    fun attachRenderer(r: SurfaceViewRenderer) {
+        val egl = eglBase ?: return
+        r.init(egl.eglBaseContext, null)
+        r.setEnableHardwareScaler(true)
+        remoteRenderer = r
+        remoteTrack?.addSink(r)
+    }
+
+    fun detachRenderer(r: SurfaceViewRenderer) {
+        remoteTrack?.removeSink(r)
+        if (remoteRenderer === r) remoteRenderer = null
+        r.release()
+    }
+
+    // يبدأ الاتصال من الجهة التي أرسلت الطلب
     fun startAsCaller(to: String) {
         createPc(to)
         attach(pc!!.createDataChannel("chat", DataChannel.Init()))
+        addVideoForOffer()
         pc!!.createOffer(
             Sdp(
                 onCreated = { offer ->
@@ -87,20 +166,26 @@ object WebRtcManager {
                 if (type == SessionDescription.Type.OFFER) {
                     createPc(from)
                     pc!!.setRemoteDescription(
-                        Sdp(onSet = { remoteReady() }, onError = ::report),
-                        desc
-                    )
-                    pc!!.createAnswer(
                         Sdp(
-                            onCreated = { answer ->
-                                pc?.setLocalDescription(Sdp(onError = ::report), answer)
-                                sendSdp(from, answer)
-                                iceReady = true
-                                flushOutIce()
+                            onSet = {
+                                addLocalIfAny()
+                                remoteReady()
+                                pc?.createAnswer(
+                                    Sdp(
+                                        onCreated = { answer ->
+                                            pc?.setLocalDescription(Sdp(onError = ::report), answer)
+                                            sendSdp(from, answer)
+                                            iceReady = true
+                                            flushOutIce()
+                                        },
+                                        onError = ::report
+                                    ),
+                                    MediaConstraints()
+                                )
                             },
                             onError = ::report
                         ),
-                        MediaConstraints()
+                        desc
                     )
                 } else {
                     pc?.setRemoteDescription(
@@ -131,10 +216,30 @@ object WebRtcManager {
         channel = null
         pc?.close()
         pc = null
+        remoteRenderer?.let { remoteTrack?.removeSink(it) }
+        remoteTrack = null
         iceReady = false
         remoteSet = false
         pendingOutIce.clear()
         pendingInIce.clear()
+    }
+
+    private fun addVideoForOffer() {
+        val p = pc ?: return
+        val t = localTrack
+        if (t != null) {
+            p.addTrack(t, listOf("screen"))
+        } else {
+            p.addTransceiver(
+                MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
+                RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY)
+            )
+        }
+    }
+
+    private fun addLocalIfAny() {
+        val t = localTrack ?: return
+        pc?.addTrack(t, listOf("screen"))
     }
 
     private fun createPc(to: String) {
@@ -175,6 +280,16 @@ object WebRtcManager {
             }
 
             override fun onRenegotiationNeeded() {}
+
+            override fun onTrack(transceiver: RtpTransceiver?) {
+                val track = transceiver?.receiver?.track()
+                if (track is VideoTrack) {
+                    main.post {
+                        remoteTrack = track
+                        remoteRenderer?.let { track.addSink(it) }
+                    }
+                }
+            }
         })
     }
 

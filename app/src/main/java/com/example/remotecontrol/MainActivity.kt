@@ -16,6 +16,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -36,10 +38,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONObject
+import org.webrtc.SurfaceViewRenderer
 import java.net.URI
 import kotlin.random.Random
 
@@ -66,7 +70,7 @@ fun HomeScreen() {
     val deviceId = remember { Random.nextInt(100000, 999999).toString() }
     var status by remember { mutableStateOf("جارٍ الاتصال...") }
     var sharing by remember { mutableStateOf(false) }
-    var captureInfo by remember { mutableStateOf("لم تُلتقط الشاشة بعد") }
+    var captureInfo by remember { mutableStateOf("الشاشة غير مُشارَكة") }
     var incomingFrom by remember { mutableStateOf<String?>(null) }
     var trusted by remember { mutableStateOf(TrustedDevices.all().toList().sorted()) }
     var targetId by remember { mutableStateOf("") }
@@ -89,28 +93,32 @@ fun HomeScreen() {
     }
 
     DisposableEffect(Unit) {
-        ScreenShareService.onFrameCaptured = { message -> captureInfo = message }
-        ScreenShareService.onStopped = {
+        WebRtcManager.onState = { rtcState = it }
+        WebRtcManager.onText = { received = it }
+        WebRtcManager.onScreenStopped = {
             sharing = false
             captureInfo = "توقفت المشاركة"
         }
-        WebRtcManager.onState = { rtcState = it }
-        WebRtcManager.onText = { received = it }
         onDispose {
-            ScreenShareService.onFrameCaptured = null
-            ScreenShareService.onStopped = null
             WebRtcManager.onState = null
             WebRtcManager.onText = null
+            WebRtcManager.onScreenStopped = null
         }
+    }
+
+    val renderer = remember { SurfaceViewRenderer(context) }
+    DisposableEffect(renderer) {
+        WebRtcManager.attachRenderer(renderer)
+        onDispose { WebRtcManager.detachRenderer(renderer) }
     }
 
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
             val intent = Intent(context, ScreenShareService::class.java).apply {
-                putExtra(ScreenShareService.EXTRA_RESULT_CODE, result.resultCode)
-                putExtra(ScreenShareService.EXTRA_DATA, result.data)
+                putExtra(ScreenShareService.EXTRA_DATA, data)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -118,13 +126,13 @@ fun HomeScreen() {
                 context.startService(intent)
             }
             sharing = true
+            captureInfo = "الشاشة تُلتقط للبث"
         }
     }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        // نطلب إذن التقاط الشاشة سواء وافق المستخدم على الإشعارات أم لا
         val manager = context.getSystemService(MediaProjectionManager::class.java)
         projectionLauncher.launch(manager.createScreenCaptureIntent())
     }
@@ -143,6 +151,14 @@ fun HomeScreen() {
         Text(text = captureInfo)
         Text(text = "حالة WebRTC: $rtcState")
         Text(text = "رسالة مستلمة: $received")
+
+        AndroidView(
+            factory = { renderer },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(240.dp)
+                .padding(vertical = 8.dp)
+        )
 
         incomingFrom?.let { from ->
             Text(text = "طلب اتصال من الجهاز $from")
@@ -199,6 +215,11 @@ fun HomeScreen() {
                 Text("إيقاف المشاركة")
             }
         }
+
+        Text(
+            text = "شارك الشاشة قبل الاتصال حتى يصل الفيديو",
+            modifier = Modifier.padding(top = 8.dp)
+        )
 
         OutlinedTextField(
             value = targetId,
