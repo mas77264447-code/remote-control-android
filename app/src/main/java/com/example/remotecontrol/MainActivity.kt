@@ -43,7 +43,6 @@ import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONObject
 import org.webrtc.SurfaceViewRenderer
 import java.net.URI
-import kotlin.random.Random
 
 const val SERVER_URL = "wss://signaling-server-xp4s.onrender.com"
 
@@ -65,7 +64,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
-    val deviceId = remember { Random.nextInt(100000, 999999).toString() }
+    val deviceId = remember { TrustedDevices.selfId() }
     var status by remember { mutableStateOf("جارٍ الاتصال...") }
     var sharing by remember { mutableStateOf(false) }
     var captureInfo by remember { mutableStateOf("الشاشة غير مُشارَكة") }
@@ -110,7 +109,6 @@ fun HomeScreen() {
         }
     }
 
-    // نافذة واحدة فقط للفيديو، تُعرض في مكان واحد في كل لحظة
     val renderer = remember { SurfaceViewRenderer(context) }
     DisposableEffect(renderer) {
         WebRtcManager.attachRenderer(renderer)
@@ -167,7 +165,7 @@ fun HomeScreen() {
                 }
             }
             AndroidView(
-                factory = { ctx -> (renderer.parent as? android.view.ViewGroup)?.removeView(renderer); renderer },
+                factory = { renderer },
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
@@ -196,6 +194,14 @@ fun HomeScreen() {
                 Text("عرض الشاشة كاملة")
             }
         }
+
+        AndroidView(
+            factory = { renderer },
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(vertical = 8.dp)
+        )
 
         incomingFrom?.let { from ->
             Text(text = "طلب اتصال من الجهاز $from")
@@ -333,8 +339,9 @@ fun connectToServer(
     onCallResult: (String, Boolean) -> Unit
 ): WebSocketClient {
     val mainHandler = Handler(Looper.getMainLooper())
+    lateinit var client: WebSocketClient
 
-    val client = object : WebSocketClient(URI(SERVER_URL)) {
+    fun build(): WebSocketClient = object : WebSocketClient(URI(SERVER_URL)) {
         override fun onOpen(handshake: ServerHandshake?) {
             send(JSONObject().put("type", "register").put("id", deviceId).toString())
             mainHandler.post { onStatus("متصل بالخادم") }
@@ -373,14 +380,25 @@ fun connectToServer(
         }
 
         override fun onClose(code: Int, reason: String?, remote: Boolean) {
-            mainHandler.post { onStatus("انقطع الاتصال") }
+            mainHandler.post { onStatus("انقطع الاتصال، جارٍ إعادة المحاولة...") }
+            mainHandler.postDelayed({ reconnect() }, 3000)
         }
 
         override fun onError(ex: Exception?) {
             mainHandler.post { onStatus("خطأ في الاتصال") }
         }
     }
-    client.connect()
-    WebRtcManager.sender = { to, data -> sendRaw(client, to, data) }
-    return client
+
+    fun reconnect() {
+        try {
+            client = build()
+            client.connect()
+            WebRtcManager.sender = { to, data -> sendRaw(client, to, data) }
+        } catch (e: Exception) {
+            mainHandler.postDelayed({ reconnect() }, 3000)
+        }
+    }
+
+    reconnect()
+    return object : WebSocketClient(URI("ws://localhost")) {}.let { client }
 }
