@@ -50,6 +50,11 @@ import kotlin.random.Random
 
 const val SERVER_URL = "wss://signaling-server-xp4s.onrender.com"
 
+// أنواع المصادر التي يمكن أن يطلبها المتحكم
+const val SRC_SCREEN = "screen"
+const val SRC_FRONT = "front"
+const val SRC_BACK = "back"
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,6 +84,12 @@ private fun startCaptureService(context: Context, intent: Intent) {
     }
 }
 
+private fun sourceLabel(src: String): String = when (src) {
+    SRC_FRONT -> "كاميرا أمامية"
+    SRC_BACK -> "كاميرا خلفية"
+    else -> "مشاركة الشاشة"
+}
+
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
@@ -86,20 +97,28 @@ fun HomeScreen() {
     var status by remember { mutableStateOf("جارٍ الاتصال...") }
     var sharing by remember { mutableStateOf(false) }
     var captureInfo by remember { mutableStateOf("لم يبدأ البث بعد") }
-    var incomingFrom by remember { mutableStateOf<String?>(null) }
-    var trusted by remember { mutableStateOf(TrustedDevices.all().toList().sorted()) }
     var targetId by remember { mutableStateOf("") }
     var rtcState by remember { mutableStateOf("لم تبدأ بعد") }
     var received by remember { mutableStateOf("لا رسائل بعد") }
+    var trusted by remember { mutableStateOf(TrustedDevices.all().toList().sorted()) }
     var inCall by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
-    var pendingKind by remember { mutableStateOf("") }
+
+    // طلب وارد من جهاز آخر: المعرّف ونوع المصدر المطلوب
+    var incomingFrom by remember { mutableStateOf<String?>(null) }
+    var incomingSource by remember { mutableStateOf(SRC_SCREEN) }
+
+    // المصدر الذي ينتظر إذن النظام قبل بدء البث
+    var pendingSource by remember { mutableStateOf("") }
 
     val link = remember(deviceId) {
         ServerLink(
             deviceId = deviceId,
             onStatus = { status = it },
-            onIncoming = { from -> incomingFrom = from },
+            onIncoming = { from, src ->
+                incomingFrom = from
+                incomingSource = src
+            },
             onCallResult = { from, accepted ->
                 status = if (accepted) "وافق الجهاز $from على الاتصال" else "رفض الجهاز $from الاتصال"
                 if (accepted) {
@@ -135,14 +154,23 @@ fun HomeScreen() {
         onDispose { WebRtcManager.detachRenderer(renderer) }
     }
 
-    fun beginCamera(front: Boolean) {
-        val intent = Intent(context, ScreenShareService::class.java).apply {
-            putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_CAMERA)
-            putExtra(ScreenShareService.EXTRA_FRONT, front)
+    // يبدأ المصدر المطلوب على هذا الجهاز بعد موافقة المستخدم
+    fun startSource(src: String) {
+        if (src == SRC_SCREEN) {
+            // الشاشة تحتاج إذن النظام أولاً، والنتيجة تأتي في projectionLauncher
+            pendingSource = SRC_SCREEN
+            val manager = context.getSystemService(MediaProjectionManager::class.java)
+            projectionLauncher.launch(manager.createScreenCaptureIntent())
+        } else {
+            val front = src == SRC_FRONT
+            val intent = Intent(context, ScreenShareService::class.java).apply {
+                putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_CAMERA)
+                putExtra(ScreenShareService.EXTRA_FRONT, front)
+            }
+            startCaptureService(context, intent)
+            sharing = true
+            captureInfo = if (front) "الكاميرا الأمامية تعمل" else "الكاميرا الخلفية تعمل"
         }
-        startCaptureService(context, intent)
-        sharing = true
-        captureInfo = if (front) "الكاميرا الأمامية تعمل" else "الكاميرا الخلفية تعمل"
     }
 
     val projectionLauncher = rememberLauncherForActivityResult(
@@ -157,16 +185,19 @@ fun HomeScreen() {
             startCaptureService(context, intent)
             sharing = true
             captureInfo = "الشاشة تُلتقط للبث"
+        } else {
+            status = "لم يُمنح إذن التقاط الشاشة"
         }
+        pendingSource = ""
     }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        val front = pendingKind == "front"
-        pendingKind = ""
-        if (granted) {
-            beginCamera(front)
+        val src = pendingSource
+        pendingSource = ""
+        if (granted && src.isNotEmpty()) {
+            startSource(src)
         } else {
             status = "لم يُمنح إذن الكاميرا"
         }
@@ -175,16 +206,27 @@ fun HomeScreen() {
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
-        if (pendingKind == "screen") {
-            val manager = context.getSystemService(MediaProjectionManager::class.java)
-            projectionLauncher.launch(manager.createScreenCaptureIntent())
-        } else {
-            status = "فعّلنا الإشعارات، اضغط الزر مرة أخرى"
+        val src = pendingSource
+        pendingSource = ""
+        if (src.isNotEmpty()) startSource(src)
+    }
+
+    // يطلب الإذن المناسب ثم يبدأ المصدر
+    fun requestAndStart(src: String) {
+        if (needsNotificationPermission(context)) {
+            pendingSource = src
+            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
         }
+        if (src != SRC_SCREEN && !hasPermission(context, Manifest.permission.CAMERA)) {
+            pendingSource = src
+            cameraLauncher.launch(Manifest.permission.CAMERA)
+            return
+        }
+        startSource(src)
     }
 
     if (fullScreen) {
-        // وضع ملء الشاشة: النافذة تُعرض هنا فقط
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -220,7 +262,6 @@ fun HomeScreen() {
         return
     }
 
-    // الواجهة الرئيسية: لا تعرض النافذة إلا عندما لا تكون في وضع ملء الشاشة
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -241,78 +282,45 @@ fun HomeScreen() {
             }
         }
 
+        // بطاقة الطلب الوارد: المستقبِل يختار ويبدأ بنفسه
         incomingFrom?.let { from ->
-            Text(text = "طلب اتصال من الجهاز $from")
+            Text(text = "يطلب الجهاز $from: ${sourceLabel(incomingSource)}")
             Button(onClick = {
-                link.send(from, "call_accept")
+                val src = incomingSource
                 incomingFrom = null
-                status = "قبلت الاتصال من $from"
+                link.send(from, "call_accept")
+                status = "وافقت على طلب $from"
+                requestAndStart(src)
                 inCall = true
                 fullScreen = true
             }) {
-                Text("قبول مرة واحدة")
-            }
-            Button(onClick = {
-                TrustedDevices.add(from)
-                trusted = TrustedDevices.all().toList().sorted()
-                link.send(from, "call_accept")
-                incomingFrom = null
-                status = "أُضيف $from إلى الأجهزة الموثوقة"
-                inCall = true
-                fullScreen = true
-            }) {
-                Text("قبول دائم")
+                Text("موافقة وبدء")
             }
             Button(onClick = {
                 link.send(from, "call_reject")
                 incomingFrom = null
-                status = "رفضت الاتصال من $from"
+                status = "رفضت طلب $from"
             }) {
                 Text("رفض")
             }
         }
 
         if (!sharing) {
-            Button(onClick = {
-                pendingKind = "screen"
-                if (needsNotificationPermission(context)) {
-                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } else {
-                    val manager = context.getSystemService(MediaProjectionManager::class.java)
-                    projectionLauncher.launch(manager.createScreenCaptureIntent())
-                }
-            }) {
+            Text(
+                text = "اختر المصدر الذي تشاركه",
+                modifier = Modifier.padding(top = 8.dp)
+            )
+            Button(onClick = { requestAndStart(SRC_SCREEN) }) {
                 Text("مشاركة الشاشة")
             }
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                Button(onClick = {
-                    pendingKind = "front"
-                    if (needsNotificationPermission(context)) {
-                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else if (!hasPermission(context, Manifest.permission.CAMERA)) {
-                        cameraLauncher.launch(Manifest.permission.CAMERA)
-                    } else {
-                        pendingKind = ""
-                        beginCamera(true)
-                    }
-                }) {
+                Button(onClick = { requestAndStart(SRC_FRONT) }) {
                     Text("كاميرا أمامية")
                 }
-                Button(onClick = {
-                    pendingKind = "back"
-                    if (needsNotificationPermission(context)) {
-                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else if (!hasPermission(context, Manifest.permission.CAMERA)) {
-                        cameraLauncher.launch(Manifest.permission.CAMERA)
-                    } else {
-                        pendingKind = ""
-                        beginCamera(false)
-                    }
-                }) {
+                Button(onClick = { requestAndStart(SRC_BACK) }) {
                     Text("كاميرا خلفية")
                 }
             }
@@ -329,11 +337,6 @@ fun HomeScreen() {
             }
         }
 
-        Text(
-            text = "اختر المصدر قبل الاتصال حتى يصل الفيديو",
-            modifier = Modifier.padding(top = 8.dp)
-        )
-
         OutlinedTextField(
             value = targetId,
             onValueChange = { input -> targetId = input.filter { it.isDigit() }.take(6) },
@@ -343,24 +346,20 @@ fun HomeScreen() {
             modifier = Modifier.padding(top = 8.dp)
         )
 
-        Button(onClick = {
-            val target = targetId.trim()
-            if (target.isEmpty()) {
-                status = "أدخل معرّف الجهاز الآخر أولاً"
-                return@Button
+        Text(text = "اطلب من الجهاز الآخر:", modifier = Modifier.padding(top = 8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Button(onClick = { requestCall(link, deviceId, targetId, SRC_FRONT) { status = it } }) {
+                Text("طلب أمامية")
             }
-            if (target == deviceId) {
-                status = "لا يمكن الاتصال بنفس الجهاز"
-                return@Button
+            Button(onClick = { requestCall(link, deviceId, targetId, SRC_BACK) { status = it } }) {
+                Text("طلب خلفية")
             }
-            if (!link.isConnected()) {
-                status = "غير متصل بالخادم"
-                return@Button
+            Button(onClick = { requestCall(link, deviceId, targetId, SRC_SCREEN) { status = it } }) {
+                Text("طلب شاشة")
             }
-            link.send(target, "call_request")
-            status = "أُرسل طلب اتصال إلى $target"
-        }) {
-            Text("الاتصال بجهاز")
         }
 
         Button(onClick = {
@@ -385,10 +384,35 @@ fun HomeScreen() {
     }
 }
 
+// يرسل طلب اتصال مع نوع المصدر المطلوب
+fun requestCall(
+    link: ServerLink,
+    deviceId: String,
+    targetRaw: String,
+    src: String,
+    onStatus: (String) -> Unit
+) {
+    val target = targetRaw.trim()
+    if (target.isEmpty()) {
+        onStatus("أدخل معرّف الجهاز الآخر أولاً")
+        return
+    }
+    if (target == deviceId) {
+        onStatus("لا يمكن الاتصال بنفس الجهاز")
+        return
+    }
+    if (!link.isConnected()) {
+        onStatus("غير متصل بالخادم")
+        return
+    }
+    link.sendRequest(target, src)
+    onStatus("أُرسل طلب ${sourceLabel(src)} إلى $target")
+}
+
 class ServerLink(
     private val deviceId: String,
     private val onStatus: (String) -> Unit,
-    private val onIncoming: (String) -> Unit,
+    private val onIncoming: (String, String) -> Unit,
     private val onCallResult: (String, Boolean) -> Unit
 ) {
     private val main = Handler(Looper.getMainLooper())
@@ -411,6 +435,11 @@ class ServerLink(
 
     fun send(to: String, kind: String) {
         sendRaw(to, JSONObject().put("kind", kind))
+    }
+
+    // طلب يحمل نوع المصدر المطلوب من المستقبِل
+    fun sendRequest(to: String, src: String) {
+        sendRaw(to, JSONObject().put("kind", "call_request").put("src", src))
     }
 
     private fun sendRaw(to: String, data: JSONObject) {
@@ -470,11 +499,12 @@ class ServerLink(
         when (data.optString("kind")) {
             "sdp", "ice" -> WebRtcManager.handleSignal(from, data)
             "call_request" -> {
+                val src = data.optString("src", SRC_SCREEN)
                 if (TrustedDevices.contains(from)) {
-                    send(from, "call_accept")
-                    main.post { onStatus("قُبل تلقائياً طلب الجهاز الموثوق $from") }
+                    // الموثوق يُظهر البطاقة نفسها، ويبقى البدء بضغطة المستخدم
+                    main.post { onIncoming(from, src) }
                 } else {
-                    main.post { onIncoming(from) }
+                    main.post { onIncoming(from, src) }
                 }
             }
             "call_accept" -> {
