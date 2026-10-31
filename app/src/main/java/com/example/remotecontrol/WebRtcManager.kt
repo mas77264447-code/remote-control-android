@@ -16,6 +16,7 @@ import org.webrtc.MediaStream
 import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RendererCommon
 import org.webrtc.RtpTransceiver
 import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
@@ -88,7 +89,7 @@ object WebRtcManager {
             .createPeerConnectionFactory()
     }
 
-    // يبدأ التقاط الشاشة ويجهّز مسار الفيديو الذي يُرسَل عند الاتصال
+    // يبدأ التقاط الشاشة بدقتها الكاملة ويجهّز مسار الفيديو الذي يُرسَل عند الاتصال
     fun startScreen(context: Context, data: Intent) {
         init(context)
         stopScreen()
@@ -104,7 +105,7 @@ object WebRtcManager {
         })
         capturer.initialize(helper, context.applicationContext, source.capturerObserver)
         val m = context.resources.displayMetrics
-        capturer.startCapture(m.widthPixels / 2, m.heightPixels / 2, 15)
+        capturer.startCapture(m.widthPixels, m.heightPixels, 15)
         localSource = source
         localTrack = f.createVideoTrack("screen0", source)
         localCapturer = capturer
@@ -128,6 +129,8 @@ object WebRtcManager {
         val egl = eglBase ?: return
         r.init(egl.eglBaseContext, null)
         r.setEnableHardwareScaler(true)
+        // يحافظ على كامل محتوى الشاشة ونسبتها دون قص، مع أشرطة عند الحاجة
+        r.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
         remoteRenderer = r
         remoteTrack?.addSink(r)
     }

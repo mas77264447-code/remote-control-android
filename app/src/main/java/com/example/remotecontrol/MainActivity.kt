@@ -17,11 +17,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -140,9 +137,8 @@ fun HomeScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.Center,
+            .padding(16.dp),
+        verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(text = "معرّف هذا الجهاز: $deviceId")
@@ -152,11 +148,12 @@ fun HomeScreen() {
         Text(text = "حالة WebRTC: $rtcState")
         Text(text = "رسالة مستلمة: $received")
 
+        // نافذة الفيديو تأخذ المساحة المتبقية كلها
         AndroidView(
             factory = { renderer },
             modifier = Modifier
+                .weight(1f)
                 .fillMaxWidth()
-                .height(240.dp)
                 .padding(vertical = 8.dp)
         )
 
@@ -227,7 +224,7 @@ fun HomeScreen() {
             label = { Text("معرّف الجهاز الآخر") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             singleLine = true,
-            modifier = Modifier.padding(top = 12.dp)
+            modifier = Modifier.padding(top = 8.dp)
         )
 
         Button(onClick = {
@@ -259,7 +256,7 @@ fun HomeScreen() {
         }
 
         if (trusted.isNotEmpty()) {
-            Text(text = "الأجهزة الموثوقة:", modifier = Modifier.padding(top = 16.dp))
+            Text(text = "الأجهزة الموثوقة:", modifier = Modifier.padding(top = 8.dp))
             trusted.forEach { id ->
                 Button(onClick = {
                     TrustedDevices.remove(id)
