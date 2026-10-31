@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -15,8 +17,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,10 +32,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
+import org.json.JSONObject
 import java.net.URI
 import kotlin.random.Random
 
@@ -57,112 +63,7 @@ fun HomeScreen() {
     var status by remember { mutableStateOf("جارٍ الاتصال...") }
     var sharing by remember { mutableStateOf(false) }
     var captureInfo by remember { mutableStateOf("لم تُلتقط الشاشة بعد") }
+    var incoming by remember { mutableStateOf("") }
+    var targetId by remember { mutableStateOf("") }
 
-    remember(deviceId) {
-        connectToServer(deviceId) { newStatus -> status = newStatus }
-    }
-
-    DisposableEffect(Unit) {
-        ScreenShareService.onFrameCaptured = { message -> captureInfo = message }
-        ScreenShareService.onStopped = {
-            sharing = false
-            captureInfo = "توقفت المشاركة"
-        }
-        onDispose {
-            ScreenShareService.onFrameCaptured = null
-            ScreenShareService.onStopped = null
-        }
-    }
-
-    val projectionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            val intent = Intent(context, ScreenShareService::class.java).apply {
-                putExtra(ScreenShareService.EXTRA_RESULT_CODE, result.resultCode)
-                putExtra(ScreenShareService.EXTRA_DATA, result.data)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-            sharing = true
-        }
-    }
-
-    val notificationLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) {
-        // نطلب إذن التقاط الشاشة سواء وافق المستخدم على الإشعارات أم لا
-        val manager = context.getSystemService(MediaProjectionManager::class.java)
-        projectionLauncher.launch(manager.createScreenCaptureIntent())
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(text = "معرّف هذا الجهاز: $deviceId")
-        Text(text = status)
-        Text(text = if (sharing) "الشاشة مُشارَكة الآن" else "الشاشة غير مُشارَكة")
-        Text(text = captureInfo)
-
-        if (!sharing) {
-            Button(onClick = {
-                val needsNotificationPermission = Build.VERSION.SDK_INT >= 33 &&
-                    ContextCompat.checkSelfPermission(
-                        context, Manifest.permission.POST_NOTIFICATIONS
-                    ) != PackageManager.PERMISSION_GRANTED
-
-                if (needsNotificationPermission) {
-                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } else {
-                    val manager = context.getSystemService(MediaProjectionManager::class.java)
-                    projectionLauncher.launch(manager.createScreenCaptureIntent())
-                }
-            }) {
-                Text("مشاركة الشاشة")
-            }
-        } else {
-            Button(onClick = {
-                val stopIntent = Intent(context, ScreenShareService::class.java).apply {
-                    action = ScreenShareService.ACTION_STOP
-                }
-                context.startService(stopIntent)
-                sharing = false
-                captureInfo = "توقفت المشاركة"
-            }) {
-                Text("إيقاف المشاركة")
-            }
-        }
-
-        Button(onClick = { /* لاحقاً: الاتصال بجهاز */ }) {
-            Text("الاتصال بجهاز")
-        }
-    }
-}
-
-fun connectToServer(deviceId: String, onStatus: (String) -> Unit): WebSocketClient {
-    val client = object : WebSocketClient(URI(SERVER_URL)) {
-        override fun onOpen(handshake: ServerHandshake?) {
-            send("""{"type":"register","id":"$deviceId"}""")
-            onStatus("متصل بالخادم")
-        }
-
-        override fun onMessage(message: String?) {}
-
-        override fun onClose(code: Int, reason: String?, remote: Boolean) {
-            onStatus("انقطع الاتصال")
-        }
-
-        override fun onError(ex: Exception?) {
-            onStatus("خطأ في الاتصال")
-        }
-    }
-    client.connect()
-    return client
-}
+    val client
