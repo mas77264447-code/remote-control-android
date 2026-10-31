@@ -6,6 +6,7 @@ import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.Looper
 import org.json.JSONObject
+import org.webrtc.Camera2Enumerator
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -23,6 +24,7 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import java.nio.ByteBuffer
@@ -68,7 +70,7 @@ object WebRtcManager {
 
     private var localSource: VideoSource? = null
     private var localTrack: VideoTrack? = null
-    private var localCapturer: ScreenCapturerAndroid? = null
+    private var localCapturer: VideoCapturer? = null
     private var localHelper: SurfaceTextureHelper? = null
     private var remoteTrack: VideoTrack? = null
     private var remoteRenderer: SurfaceViewRenderer? = null
@@ -89,7 +91,7 @@ object WebRtcManager {
             .createPeerConnectionFactory()
     }
 
-    // يبدأ التقاط الشاشة بدقتها الكاملة ويجهّز مسار الفيديو الذي يُرسَل عند الاتصال
+    // يبدأ التقاط الشاشة بدقتها الكاملة
     fun startScreen(context: Context, data: Intent) {
         init(context)
         stopScreen()
@@ -112,6 +114,36 @@ object WebRtcManager {
         localHelper = helper
     }
 
+    // يبدأ التقاط الكاميرا الأمامية أو الخلفية حسب اختيار المستخدم
+    fun startCamera(context: Context, front: Boolean): Boolean {
+        init(context)
+        stopScreen()
+        val egl = eglBase ?: return false
+        val f = factory ?: return false
+        val enumerator = Camera2Enumerator(context.applicationContext)
+        val name = enumerator.deviceNames.firstOrNull {
+            if (front) enumerator.isFrontFacing(it) else enumerator.isBackFacing(it)
+        }
+        if (name == null) {
+            report("لا توجد كاميرا بهذا الاتجاه")
+            return false
+        }
+        val capturer = enumerator.createCapturer(name, null)
+        if (capturer == null) {
+            report("تعذّر فتح الكاميرا")
+            return false
+        }
+        val helper = SurfaceTextureHelper.create("CameraCapture", egl.eglBaseContext)
+        val source = f.createVideoSource(false)
+        capturer.initialize(helper, context.applicationContext, source.capturerObserver)
+        capturer.startCapture(1280, 720, 30)
+        localSource = source
+        localTrack = f.createVideoTrack("camera0", source)
+        localCapturer = capturer
+        localHelper = helper
+        return true
+    }
+
     fun stopScreen() {
         try {
             localCapturer?.stopCapture()
@@ -129,7 +161,6 @@ object WebRtcManager {
         val egl = eglBase ?: return
         r.init(egl.eglBaseContext, null)
         r.setEnableHardwareScaler(true)
-        // يحافظ على كامل محتوى الشاشة ونسبتها دون قص، مع أشرطة عند الحاجة
         r.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
         remoteRenderer = r
         remoteTrack?.addSink(r)

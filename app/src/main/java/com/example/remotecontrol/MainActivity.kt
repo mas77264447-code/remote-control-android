@@ -2,6 +2,7 @@ package com.example.remotecontrol
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
@@ -46,6 +47,7 @@ import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONObject
 import org.webrtc.SurfaceViewRenderer
 import java.net.URI
+import kotlin.random.Random
 
 const val SERVER_URL = "wss://signaling-server-xp4s.onrender.com"
 
@@ -64,13 +66,27 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun hasPermission(context: Context, permission: String): Boolean =
+    ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+private fun needsNotificationPermission(context: Context): Boolean =
+    Build.VERSION.SDK_INT >= 33 && !hasPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+
+private fun startCaptureService(context: Context, intent: Intent) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        context.startForegroundService(intent)
+    } else {
+        context.startService(intent)
+    }
+}
+
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
     val deviceId = remember { TrustedDevices.selfId() }
     var status by remember { mutableStateOf("جارٍ الاتصال...") }
     var sharing by remember { mutableStateOf(false) }
-    var captureInfo by remember { mutableStateOf("الشاشة غير مُشارَكة") }
+    var captureInfo by remember { mutableStateOf("لم يبدأ البث بعد") }
     var incomingFrom by remember { mutableStateOf<String?>(null) }
     var trusted by remember { mutableStateOf(TrustedDevices.all().toList().sorted()) }
     var targetId by remember { mutableStateOf("") }
@@ -78,6 +94,8 @@ fun HomeScreen() {
     var received by remember { mutableStateOf("لا رسائل بعد") }
     var inCall by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
+    // مصدر البث الذي ينتظر إذناً: "screen" أو "front" أو "back"
+    var pendingKind by remember { mutableStateOf("") }
 
     val link = remember(deviceId) {
         ServerLink(
@@ -119,33 +137,55 @@ fun HomeScreen() {
         onDispose { WebRtcManager.detachRenderer(renderer) }
     }
 
+    fun beginCamera(front: Boolean) {
+        val intent = Intent(context, ScreenShareService::class.java).apply {
+            putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_CAMERA)
+            putExtra(ScreenShareService.EXTRA_FRONT, front)
+        }
+        startCaptureService(context, intent)
+        sharing = true
+        captureInfo = if (front) "الكاميرا الأمامية تعمل" else "الكاميرا الخلفية تعمل"
+    }
+
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
             val intent = Intent(context, ScreenShareService::class.java).apply {
+                putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_SCREEN)
                 putExtra(ScreenShareService.EXTRA_DATA, data)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            startCaptureService(context, intent)
             sharing = true
             captureInfo = "الشاشة تُلتقط للبث"
         }
     }
 
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val front = pendingKind == "front"
+        pendingKind = ""
+        if (granted) {
+            beginCamera(front)
+        } else {
+            status = "لم يُمنح إذن الكاميرا"
+        }
+    }
+
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) {
-        val manager = context.getSystemService(MediaProjectionManager::class.java)
-        projectionLauncher.launch(manager.createScreenCaptureIntent())
+    ) { _ ->
+        if (pendingKind == "screen") {
+            val manager = context.getSystemService(MediaProjectionManager::class.java)
+            projectionLauncher.launch(manager.createScreenCaptureIntent())
+        } else {
+            status = "فعّلنا الإشعارات، اضغط الزر مرة أخرى"
+        }
     }
 
     if (fullScreen) {
-        // وضع ملء الشاشة: النافذة تُعرض هنا فقط، ولا تظهر في الواجهة الرئيسية
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -190,7 +230,7 @@ fun HomeScreen() {
     ) {
         Text(text = "معرّف هذا الجهاز: $deviceId")
         Text(text = status)
-        Text(text = if (sharing) "الشاشة مُشارَكة الآن" else "الشاشة غير مُشارَكة")
+        Text(text = if (sharing) "البث نشط الآن" else "البث متوقف")
         Text(text = captureInfo)
         Text(text = "حالة WebRTC: $rtcState")
         Text(text = "رسالة مستلمة: $received")
@@ -200,6 +240,14 @@ fun HomeScreen() {
                 Text("عرض الشاشة كاملة")
             }
         }
+
+        AndroidView(
+            factory = { renderer },
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(vertical = 8.dp)
+        )
 
         incomingFrom?.let { from ->
             Text(text = "طلب اتصال من الجهاز $from")
@@ -234,12 +282,8 @@ fun HomeScreen() {
 
         if (!sharing) {
             Button(onClick = {
-                val needsNotificationPermission = Build.VERSION.SDK_INT >= 33 &&
-                    ContextCompat.checkSelfPermission(
-                        context, Manifest.permission.POST_NOTIFICATIONS
-                    ) != PackageManager.PERMISSION_GRANTED
-
-                if (needsNotificationPermission) {
+                pendingKind = "screen"
+                if (needsNotificationPermission(context)) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 } else {
                     val manager = context.getSystemService(MediaProjectionManager::class.java)
@@ -247,6 +291,40 @@ fun HomeScreen() {
                 }
             }) {
                 Text("مشاركة الشاشة")
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                Button(onClick = {
+                    pendingKind = "front"
+                    if (needsNotificationPermission(context)) {
+                        pendingKind = ""
+                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else if (!hasPermission(context, Manifest.permission.CAMERA)) {
+                        cameraLauncher.launch(Manifest.permission.CAMERA)
+                    } else {
+                        pendingKind = ""
+                        beginCamera(true)
+                    }
+                }) {
+                    Text("كاميرا أمامية")
+                }
+                Button(onClick = {
+                    pendingKind = "back"
+                    if (needsNotificationPermission(context)) {
+                        pendingKind = ""
+                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else if (!hasPermission(context, Manifest.permission.CAMERA)) {
+                        cameraLauncher.launch(Manifest.permission.CAMERA)
+                    } else {
+                        pendingKind = ""
+                        beginCamera(false)
+                    }
+                }) {
+                    Text("كاميرا خلفية")
+                }
             }
         } else {
             Button(onClick = {
@@ -257,9 +335,14 @@ fun HomeScreen() {
                 sharing = false
                 captureInfo = "توقفت المشاركة"
             }) {
-                Text("إيقاف المشاركة")
+                Text("إيقاف البث")
             }
         }
+
+        Text(
+            text = "اختر المصدر قبل الاتصال حتى يصل الفيديو",
+            modifier = Modifier.padding(top = 8.dp)
+        )
 
         OutlinedTextField(
             value = targetId,
