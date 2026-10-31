@@ -4,9 +4,10 @@ import android.content.Context
 import android.content.SharedPreferences
 import kotlin.random.Random
 
+// الإذن المحفوظ = معرّف الجهاز + المصدر المسموح، مثل: 578558|front
 object TrustedDevices {
     private const val PREFS = "trusted_devices"
-    private const val KEY = "ids"
+    private const val KEY = "grants"
     private const val KEY_SELF = "self_id"
     private var prefs: SharedPreferences? = null
 
@@ -16,7 +17,6 @@ object TrustedDevices {
         }
     }
 
-    // معرّف الجهاز ثابت: يُولَّد مرة واحدة ويُحفظ
     fun selfId(): String {
         val p = prefs ?: return Random.nextInt(100000, 999999).toString()
         val existing = p.getString(KEY_SELF, null)
@@ -26,19 +26,36 @@ object TrustedDevices {
         return fresh
     }
 
-    fun all(): Set<String> = prefs?.getStringSet(KEY, emptySet()) ?: emptySet()
+    private fun grants(): MutableSet<String> =
+        (prefs?.getStringSet(KEY, emptySet()) ?: emptySet()).toMutableSet()
 
-    fun contains(id: String): Boolean = all().contains(id)
-
-    fun add(id: String) {
-        val updated = all().toMutableSet()
-        updated.add(id)
-        prefs?.edit()?.putStringSet(KEY, updated)?.apply()
+    private fun save(set: Set<String>) {
+        prefs?.edit()?.putStringSet(KEY, set)?.apply()
     }
 
-    fun remove(id: String) {
-        val updated = all().toMutableSet()
-        updated.remove(id)
-        prefs?.edit()?.putStringSet(KEY, updated)?.apply()
+    // هل يملك هذا الجهاز إذناً محفوظاً لهذا المصدر؟
+    fun allows(id: String, src: String): Boolean = grants().contains("$id|$src")
+
+    fun grant(id: String, src: String) {
+        val g = grants()
+        g.add("$id|$src")
+        save(g)
     }
+
+    fun revoke(id: String, src: String) {
+        val g = grants()
+        g.remove("$id|$src")
+        save(g)
+    }
+
+    fun revokeAll() {
+        save(emptySet())
+    }
+
+    // قائمة مرتبة للعرض: كل زوج معرّف ومصدر
+    fun list(): List<Pair<String, String>> =
+        grants().map { entry ->
+            val parts = entry.split("|")
+            parts[0] to parts[1]
+        }.sortedWith(compareBy({ it.first }, { it.second }))
 }

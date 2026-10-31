@@ -13,6 +13,7 @@ import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -89,6 +90,54 @@ private fun sourceLabel(src: String): String = when (src) {
     else -> "مشاركة الشاشة"
 }
 
+private fun startSourceNow(
+    context: Context,
+    src: String,
+    setSharing: (Boolean) -> Unit,
+    setCaptureInfo: (String) -> Unit,
+    projectionLauncher: ActivityResultLauncher<Intent>,
+    setPending: (String) -> Unit
+) {
+    if (src == SRC_SCREEN) {
+        setPending(SRC_SCREEN)
+        val manager = context.getSystemService(MediaProjectionManager::class.java)
+        projectionLauncher.launch(manager.createScreenCaptureIntent())
+    } else {
+        val front = src == SRC_FRONT
+        val intent = Intent(context, ScreenShareService::class.java).apply {
+            putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_CAMERA)
+            putExtra(ScreenShareService.EXTRA_FRONT, front)
+        }
+        startCaptureService(context, intent)
+        setSharing(true)
+        setCaptureInfo(if (front) "الكاميرا الأمامية تعمل" else "الكاميرا الخلفية تعمل")
+    }
+}
+
+fun requestCall(
+    link: ServerLink,
+    deviceId: String,
+    targetRaw: String,
+    src: String,
+    onStatus: (String) -> Unit
+) {
+    val target = targetRaw.trim()
+    if (target.isEmpty()) {
+        onStatus("أدخل معرّف الجهاز الآخر أولاً")
+        return
+    }
+    if (target == deviceId) {
+        onStatus("لا يمكن الاتصال بنفس الجهاز")
+        return
+    }
+    if (!link.isConnected()) {
+        onStatus("غير متصل بالخادم")
+        return
+    }
+    link.sendRequest(target, src)
+    onStatus("أُرسل طلب ${sourceLabel(src)} إلى $target")
+}
+
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
@@ -99,7 +148,7 @@ fun HomeScreen() {
     var targetId by remember { mutableStateOf("") }
     var rtcState by remember { mutableStateOf("لم تبدأ بعد") }
     var received by remember { mutableStateOf("لا رسائل بعد") }
-    var trusted by remember { mutableStateOf(TrustedDevices.all().toList().sorted()) }
+    var grants by remember { mutableStateOf(TrustedDevices.list()) }
     var inCall by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
 
@@ -113,8 +162,16 @@ fun HomeScreen() {
             deviceId = deviceId,
             onStatus = { status = it },
             onIncoming = { from, src ->
-                incomingFrom = from
-                incomingSource = src
+                // إذن محفوظ لهذا الجهاز والمصدر: يبدأ تلقائياً مع إشعار واضح
+                if (TrustedDevices.allows(from, src)) {
+                    incomingFrom = from
+                    incomingSource = src
+                    status = "طلب من $from بإذن محفوظ، بدأ البث"
+                    pendingAutoStart = Pair(from, src)
+                } else {
+                    incomingFrom = from
+                    incomingSource = src
+                }
             },
             onCallResult = { from, accepted ->
                 status = if (accepted) "وافق الجهاز $from على الاتصال" else "رفض الجهاز $from الاتصال"
@@ -151,7 +208,6 @@ fun HomeScreen() {
         onDispose { WebRtcManager.detachRenderer(renderer) }
     }
 
-    // المشغّلات تُعرَّف أولاً لأن الدوال أدناه تستخدمها
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -273,7 +329,20 @@ fun HomeScreen() {
                 inCall = true
                 fullScreen = true
             }) {
-                Text("موافقة وبدء")
+                Text("موافقة لمرة واحدة")
+            }
+            Button(onClick = {
+                val src = incomingSource
+                TrustedDevices.grant(from, src)
+                grants = TrustedDevices.list()
+                incomingFrom = null
+                link.send(from, "call_accept")
+                status = "حُفظ إذن ${sourceLabel(src)} للجهاز $from"
+                requestAndStart(src)
+                inCall = true
+                fullScreen = true
+            }) {
+                Text("موافقة دائمة لهذا المصدر")
             }
             Button(onClick = {
                 link.send(from, "call_reject")
@@ -349,67 +418,33 @@ fun HomeScreen() {
             Text("إرسال رسالة تجريبية")
         }
 
-        if (trusted.isNotEmpty()) {
-            Text(text = "الأجهزة الموثوقة:", modifier = Modifier.padding(top = 8.dp))
-            trusted.forEach { id ->
-                Button(onClick = {
-                    TrustedDevices.remove(id)
-                    trusted = TrustedDevices.all().toList().sorted()
-                }) {
-                    Text("حذف $id")
+        Text(text = "الأجهزة الموثوقة", modifier = Modifier.padding(top = 12.dp))
+        if (grants.isEmpty()) {
+            Text(text = "لا توجد أذونات محفوظة")
+        } else {
+            grants.forEach { (id, src) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "$id: ${sourceLabel(src)}")
+                    Button(onClick = {
+                        TrustedDevices.revoke(id, src)
+                        grants = TrustedDevices.list()
+                    }) {
+                        Text("حذف")
+                    }
                 }
+            }
+            Button(onClick = {
+                TrustedDevices.revokeAll()
+                grants = TrustedDevices.list()
+            }) {
+                Text("حذف الكل")
             }
         }
     }
-}
-
-// يبدأ المصدر على هذا الجهاز بعد أن تكون الأذونات جاهزة
-private fun startSourceNow(
-    context: Context,
-    src: String,
-    setSharing: (Boolean) -> Unit,
-    setCaptureInfo: (String) -> Unit,
-    projectionLauncher: androidx.activity.result.ActivityResultLauncher<Intent>,
-    setPending: (String) -> Unit
-) {
-    if (src == SRC_SCREEN) {
-        setPending(SRC_SCREEN)
-        val manager = context.getSystemService(MediaProjectionManager::class.java)
-        projectionLauncher.launch(manager.createScreenCaptureIntent())
-    } else {
-        val front = src == SRC_FRONT
-        val intent = Intent(context, ScreenShareService::class.java).apply {
-            putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_CAMERA)
-            putExtra(ScreenShareService.EXTRA_FRONT, front)
-        }
-        startCaptureService(context, intent)
-        setSharing(true)
-        setCaptureInfo(if (front) "الكاميرا الأمامية تعمل" else "الكاميرا الخلفية تعمل")
-    }
-}
-
-fun requestCall(
-    link: ServerLink,
-    deviceId: String,
-    targetRaw: String,
-    src: String,
-    onStatus: (String) -> Unit
-) {
-    val target = targetRaw.trim()
-    if (target.isEmpty()) {
-        onStatus("أدخل معرّف الجهاز الآخر أولاً")
-        return
-    }
-    if (target == deviceId) {
-        onStatus("لا يمكن الاتصال بنفس الجهاز")
-        return
-    }
-    if (!link.isConnected()) {
-        onStatus("غير متصل بالخادم")
-        return
-    }
-    link.sendRequest(target, src)
-    onStatus("أُرسل طلب ${sourceLabel(src)} إلى $target")
 }
 
 class ServerLink(
