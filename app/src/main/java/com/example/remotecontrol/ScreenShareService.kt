@@ -29,6 +29,14 @@ class ScreenShareService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // أمر الإيقاف يأتي من زر التطبيق، ولا يحتاج إشعاراً جديداً
+        if (intent?.action == ACTION_STOP) {
+            stopCapture()
+            onStopped?.invoke()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         startForeground(NOTIFICATION_ID, buildNotification())
 
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
@@ -53,10 +61,10 @@ class ScreenShareService : Service() {
         val mp = manager.getMediaProjection(resultCode, data)
         projection = mp
 
-        // Android 14 يتطلب تسجيل الـ callback قبل إنشاء الـ VirtualDisplay
         mp.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
                 stopCapture()
+                onStopped?.invoke()
             }
         }, Handler(Looper.getMainLooper()))
 
@@ -129,8 +137,12 @@ class ScreenShareService : Service() {
         const val NOTIFICATION_ID = 1
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_DATA = "data"
+        const val ACTION_STOP = "com.example.remotecontrol.STOP"
 
         @Volatile
         var onFrameCaptured: ((String) -> Unit)? = null
+
+        @Volatile
+        var onStopped: (() -> Unit)? = null
     }
 }

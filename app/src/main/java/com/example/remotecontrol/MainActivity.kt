@@ -64,7 +64,14 @@ fun HomeScreen() {
 
     DisposableEffect(Unit) {
         ScreenShareService.onFrameCaptured = { message -> captureInfo = message }
-        onDispose { ScreenShareService.onFrameCaptured = null }
+        ScreenShareService.onStopped = {
+            sharing = false
+            captureInfo = "توقفت المشاركة"
+        }
+        onDispose {
+            ScreenShareService.onFrameCaptured = null
+            ScreenShareService.onStopped = null
+        }
     }
 
     val projectionLauncher = rememberLauncherForActivityResult(
@@ -103,21 +110,36 @@ fun HomeScreen() {
         Text(text = status)
         Text(text = if (sharing) "الشاشة مُشارَكة الآن" else "الشاشة غير مُشارَكة")
         Text(text = captureInfo)
-        Button(onClick = {
-            val needsNotificationPermission = Build.VERSION.SDK_INT >= 33 &&
-                ContextCompat.checkSelfPermission(
-                    context, Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
 
-            if (needsNotificationPermission) {
-                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            } else {
-                val manager = context.getSystemService(MediaProjectionManager::class.java)
-                projectionLauncher.launch(manager.createScreenCaptureIntent())
+        if (!sharing) {
+            Button(onClick = {
+                val needsNotificationPermission = Build.VERSION.SDK_INT >= 33 &&
+                    ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
+
+                if (needsNotificationPermission) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    val manager = context.getSystemService(MediaProjectionManager::class.java)
+                    projectionLauncher.launch(manager.createScreenCaptureIntent())
+                }
+            }) {
+                Text("مشاركة الشاشة")
             }
-        }) {
-            Text("مشاركة الشاشة")
+        } else {
+            Button(onClick = {
+                val stopIntent = Intent(context, ScreenShareService::class.java).apply {
+                    action = ScreenShareService.ACTION_STOP
+                }
+                context.startService(stopIntent)
+                sharing = false
+                captureInfo = "توقفت المشاركة"
+            }) {
+                Text("إيقاف المشاركة")
+            }
         }
+
         Button(onClick = { /* لاحقاً: الاتصال بجهاز */ }) {
             Text("الاتصال بجهاز")
         }
