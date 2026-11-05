@@ -19,6 +19,7 @@ class ScreenShareService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             WebRtcManager.stopScreen()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -28,7 +29,10 @@ class ScreenShareService : Service() {
 
         if (mode == MODE_CAMERA) {
             val front = intent?.getBooleanExtra(EXTRA_FRONT, true) ?: true
-            if (!WebRtcManager.startCamera(this, front)) stopSelf()
+            if (!WebRtcManager.startCamera(this, front)) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         } else {
             val data: Intent? = intent?.let {
                 if (Build.VERSION.SDK_INT >= 33) {
@@ -41,6 +45,7 @@ class ScreenShareService : Service() {
             if (data != null) {
                 WebRtcManager.startScreen(this, data)
             } else {
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
         }
