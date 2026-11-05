@@ -60,7 +60,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Session.init(this)
-        TrustedDevices.init(this)
         WebRtcManager.init(this)
         setContent {
             MaterialTheme {
@@ -116,7 +115,6 @@ private fun startSourceNow(
     }
 }
 
-// الواجهة الرئيسية: تختار بين شاشة الدخول والتطبيق حسب الجلسة
 @Composable
 fun AppRoot() {
     var username by remember { mutableStateOf(Session.username()) }
@@ -243,7 +241,7 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
         incomingSource = src
     }
     link.onCallResult = { from, accepted ->
-        status = if (accepted) "وافق الجهاز $from على الاتصال" else "رفض الجهاز $from الاتصال"
+        status = if (accepted) "وافق $from على الاتصال" else "رفض $from الاتصال"
         if (accepted) {
             inCall = true
             fullScreen = true
@@ -494,7 +492,6 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
     }
 }
 
-// يدير الاتصال بالخادم: الحسابات والأذونات والإشارات
 class ServerLink {
     private val main = Handler(Looper.getMainLooper())
     private var socket: WebSocketClient? = null
@@ -530,9 +527,7 @@ class ServerLink {
     fun login(user: String, pass: String) {
         currentUser = user
         currentPass = pass
-        if (isConnected()) {
-            sendLogin()
-        }
+        if (isConnected()) sendLogin()
     }
 
     fun logout() {
@@ -640,26 +635,14 @@ class ServerLink {
                 val ok = json.optBoolean("ok", false)
                 val id = if (ok) json.optString("id") else null
                 val err = if (!ok) json.optString("error", null) else null
-                val list = mutableListOf<Pair<String, String>>()
-                if (ok) {
-                    val arr: JSONArray = json.optJSONArray("grants") ?: JSONArray()
-                    for (i in 0 until arr.length()) {
-                        val g = arr.getJSONObject(i)
-                        list.add(g.getString("trusted_id") to g.getString("source"))
-                    }
-                }
+                val list = parseGrants(json.optJSONArray("grants"))
                 main.post {
-                    onGrants(list)
+                    if (ok) onGrants(list)
                     onLoginResult(ok, id, err)
                 }
             }
             "grants" -> {
-                val arr = json.optJSONArray("grants") ?: JSONArray()
-                val list = mutableListOf<Pair<String, String>>()
-                for (i in 0 until arr.length()) {
-                    val g = arr.getJSONObject(i)
-                    list.add(g.getString("trusted_id") to g.getString("source"))
-                }
+                val list = parseGrants(json.optJSONArray("grants"))
                 main.post { onGrants(list) }
             }
             "signal" -> {
@@ -680,5 +663,15 @@ class ServerLink {
             }
             "error" -> main.post { onStatus(json.optString("message")) }
         }
+    }
+
+    private fun parseGrants(arr: JSONArray?): List<Pair<String, String>> {
+        val list = mutableListOf<Pair<String, String>>()
+        if (arr == null) return list
+        for (i in 0 until arr.length()) {
+            val g = arr.getJSONObject(i)
+            list.add(g.getString("trusted_id") to g.getString("source"))
+        }
+        return list
     }
 }
