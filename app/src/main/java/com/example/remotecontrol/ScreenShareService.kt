@@ -1,15 +1,18 @@
 package com.example.remotecontrol
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 class ScreenShareService : Service() {
 
@@ -27,29 +30,37 @@ class ScreenShareService : Service() {
         }
 
         val mode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_SCREEN
+
+        // الكاميرا تحتاج إذنها قبل أن تُعلن الخدمة نوعها، وإلا يرفض النظام التشغيل
+        if (mode == MODE_CAMERA &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+        ) {
+            report("إذن الكاميرا غير ممنوح، اضغط الزر بعد منحه")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         try {
             startForeground(NOTIFICATION_ID, buildNotification(mode))
         } catch (e: Exception) {
-            report("فشل تشغيل الخدمة: ${e.javaClass.simpleName}: ${e.message}")
+            report("تعذّر بدء الخدمة: ${e.javaClass.simpleName}")
             stopSelf()
             return START_NOT_STICKY
         }
 
         if (mode == MODE_CAMERA) {
             val front = intent?.getBooleanExtra(EXTRA_FRONT, true) ?: true
-            try {
-                val ok = WebRtcManager.startCamera(this, front)
-                if (!ok) {
-                    report("تعذّر تشغيل الكاميرا، تحقق من الإذن أو من وجود الكاميرا")
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                } else {
-                    report("الكاميرا بدأت بنجاح")
-                }
+            val ok = try {
+                WebRtcManager.startCamera(this, front)
             } catch (e: Exception) {
-                report("خطأ في الكاميرا: ${e.javaClass.simpleName}: ${e.message}")
+                report("خطأ في الكاميرا: ${e.javaClass.simpleName}")
+                false
+            }
+            if (!ok) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+            } else {
+                report("الكاميرا بدأت بنجاح")
             }
         } else {
             val data: Intent? = intent?.let {
