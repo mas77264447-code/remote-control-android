@@ -56,9 +56,19 @@ const val SRC_SCREEN = "screen"
 const val SRC_FRONT = "front"
 const val SRC_BACK = "back"
 
+// يحمل آخر خطأ غير متوقع لعرضه على الشاشة
+object ErrorBus {
+    var last: String? = null
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Thread.setDefaultUncaughtExceptionHandler { _, e ->
+            val msg = "خطأ: ${e.javaClass.simpleName}: ${e.message}"
+            android.util.Log.e("RemoteControl", msg, e)
+            ErrorBus.last = msg
+        }
         Session.init(this)
         TrustedDevices.init(this)
         WebRtcManager.init(this)
@@ -338,17 +348,13 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Button(onClick = { fullScreen = false }) {
-                    Text("رجوع")
-                }
+                Button(onClick = { fullScreen = false }) { Text("رجوع") }
                 Button(onClick = {
                     WebRtcManager.close()
                     inCall = false
                     fullScreen = false
                     status = "أُنهي الاتصال"
-                }) {
-                    Text("إنهاء")
-                }
+                }) { Text("إنهاء") }
             }
             AndroidView(
                 factory = { renderer },
@@ -370,6 +376,7 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
     ) {
         Text(text = "معرّفك: $username")
         Text(text = status)
+        Text(text = ErrorBus.last ?: "لا أخطاء مسجلة")
         Text(text = if (sharing) "البث نشط الآن" else "البث متوقف")
         Text(text = captureInfo)
         Text(text = "حالة WebRTC: $rtcState")
@@ -506,13 +513,18 @@ class ServerLink {
         currentPass = null
     }
 
-    // يرسل طلب اتصال إلى حساب آخر، ويصل إلى أي جهاز متصل به
     fun requestCall(toUser: String, src: String, onMsg: (String) -> Unit) {
         if (!isConnected()) {
             onMsg("غير متصل بالخادم")
             return
         }
-        sendRawTo(toUser, JSONObject().put("kind", "call_request").put("src", src))
+        sendJson(
+            JSONObject()
+                .put("type", "signal")
+                .put("toUser", toUser)
+                .put("toDevice", "")
+                .put("data", JSONObject().put("kind", "call_request").put("src", src))
+        )
         onMsg("أُرسل طلب ${sourceLabel(src)} إلى $toUser")
     }
 
@@ -543,18 +555,6 @@ class ServerLink {
         if (s.isOpen) s.send(obj.toString())
     }
 
-    // يرسل إلى حساب بدون تحديد جهاز، ويُوجَّه الخادم إلى الجهاز المتصل
-    private fun sendRawTo(toUser: String, data: JSONObject) {
-        sendJson(
-            JSONObject()
-                .put("type", "signal")
-                .put("toUser", toUser)
-                .put("toDevice", "")
-                .put("data", data)
-        )
-    }
-
-    // لتوافق WebRtcManager، صيغة الهدف: "اسم_المستخدم/معرّف_الجهاز"
     private fun sendRaw(to: String, data: JSONObject) {
         val parts = to.split("/")
         if (parts.size == 2) {
