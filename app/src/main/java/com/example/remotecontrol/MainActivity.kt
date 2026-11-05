@@ -39,15 +39,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
+import org.json.JSONArray
 import org.json.JSONObject
 import org.webrtc.SurfaceViewRenderer
 import java.net.URI
-import kotlin.random.Random
 
 const val SERVER_URL = "wss://signaling-server-xp4s.onrender.com"
 
@@ -58,12 +59,13 @@ const val SRC_BACK = "back"
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Session.init(this)
         TrustedDevices.init(this)
         WebRtcManager.init(this)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    HomeScreen()
+                    AppRoot()
                 }
             }
         }
@@ -114,73 +116,138 @@ private fun startSourceNow(
     }
 }
 
-fun requestCall(
-    link: ServerLink,
-    deviceId: String,
-    targetRaw: String,
-    src: String,
-    onStatus: (String) -> Unit
-) {
-    val target = targetRaw.trim()
-    if (target.isEmpty()) {
-        onStatus("أدخل معرّف الجهاز الآخر أولاً")
-        return
+// الواجهة الرئيسية: تختار بين شاشة الدخول والتطبيق حسب الجلسة
+@Composable
+fun AppRoot() {
+    var username by remember { mutableStateOf(Session.username()) }
+    val link = remember { ServerLink() }
+
+    DisposableEffect(Unit) {
+        link.start()
+        onDispose { link.stop() }
     }
-    if (target == deviceId) {
-        onStatus("لا يمكن الاتصال بنفس الجهاز")
-        return
+
+    if (username == null) {
+        LoginScreen(
+            link = link,
+            onLoggedIn = { name ->
+                Session.save(name)
+                username = name
+            }
+        )
+    } else {
+        HomeScreen(
+            username = username!!,
+            link = link,
+            onLogout = {
+                Session.clear()
+                link.logout()
+                username = null
+            }
+        )
     }
-    if (!link.isConnected()) {
-        onStatus("غير متصل بالخادم")
-        return
-    }
-    link.sendRequest(target, src)
-    onStatus("أُرسل طلب ${sourceLabel(src)} إلى $target")
 }
 
 @Composable
-fun HomeScreen() {
+fun LoginScreen(link: ServerLink, onLoggedIn: (String) -> Unit) {
+    var user by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("أدخل اسم المستخدم وكلمة المرور") }
+
+    link.onLoginResult = { ok, id, error ->
+        if (ok && id != null) {
+            onLoggedIn(id)
+        } else {
+            message = error ?: "فشل الدخول"
+        }
+    }
+    link.onSignupResult = { ok, error ->
+        message = if (ok) "تم إنشاء الحساب، اضغط دخول" else (error ?: "فشل إنشاء الحساب")
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(text = message)
+        OutlinedTextField(
+            value = user,
+            onValueChange = { user = it.filter { c -> c.isLetterOrDigit() || c == '_' }.take(20) },
+            label = { Text("اسم المستخدم") },
+            singleLine = true,
+            modifier = Modifier.padding(top = 12.dp)
+        )
+        OutlinedTextField(
+            value = pass,
+            onValueChange = { pass = it },
+            label = { Text("كلمة المرور") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Button(onClick = {
+                if (user.length < 3 || pass.length < 6) {
+                    message = "الاسم 3 أحرف على الأقل، وكلمة المرور 6 على الأقل"
+                    return@Button
+                }
+                link.signup(user, pass)
+                message = "جارٍ إنشاء الحساب..."
+            }) {
+                Text("إنشاء حساب")
+            }
+            Button(onClick = {
+                if (user.isEmpty() || pass.isEmpty()) {
+                    message = "أدخل الاسم وكلمة المرور"
+                    return@Button
+                }
+                link.login(user, pass)
+                message = "جارٍ الدخول..."
+            }) {
+                Text("دخول")
+            }
+        }
+    }
+}
+
+@Composable
+fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
     val context = LocalContext.current
-    val deviceId = remember { TrustedDevices.selfId() }
-    var status by remember { mutableStateOf("جارٍ الاتصال...") }
+    var status by remember { mutableStateOf("متصل باسم $username") }
     var sharing by remember { mutableStateOf(false) }
     var captureInfo by remember { mutableStateOf("لم يبدأ البث بعد") }
     var targetId by remember { mutableStateOf("") }
     var rtcState by remember { mutableStateOf("لم تبدأ بعد") }
     var received by remember { mutableStateOf("لا رسائل بعد") }
-    var grants by remember { mutableStateOf(TrustedDevices.list()) }
+    var grants by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var inCall by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
 
     var incomingFrom by remember { mutableStateOf<String?>(null) }
     var incomingSource by remember { mutableStateOf(SRC_SCREEN) }
-
     var pendingSource by remember { mutableStateOf("") }
 
-    val link = remember(deviceId) {
-        ServerLink(
-            deviceId = deviceId,
-            onStatus = { status = it },
-            onIncoming = { from, src ->
-                incomingFrom = from
-                incomingSource = src
-                if (TrustedDevices.allows(from, src)) {
-                    status = "طلب من $from بإذن محفوظ، اضغط موافقة للبدء"
-                }
-            },
-            onCallResult = { from, accepted ->
-                status = if (accepted) "وافق الجهاز $from على الاتصال" else "رفض الجهاز $from الاتصال"
-                if (accepted) {
-                    inCall = true
-                    fullScreen = true
-                }
-            }
-        )
+    link.onStatus = { status = it }
+    link.onGrants = { grants = it }
+    link.onIncoming = { from, src ->
+        incomingFrom = from
+        incomingSource = src
     }
-
-    DisposableEffect(link) {
-        link.start()
-        onDispose { link.stop() }
+    link.onCallResult = { from, accepted ->
+        status = if (accepted) "وافق الجهاز $from على الاتصال" else "رفض الجهاز $from الاتصال"
+        if (accepted) {
+            inCall = true
+            fullScreen = true
+        }
     }
 
     DisposableEffect(Unit) {
@@ -300,7 +367,7 @@ fun HomeScreen() {
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = "معرّف هذا الجهاز: $deviceId")
+        Text(text = "اسم المستخدم (معرّفك): $username")
         Text(text = status)
         Text(text = if (sharing) "البث نشط الآن" else "البث متوقف")
         Text(text = captureInfo)
@@ -314,7 +381,7 @@ fun HomeScreen() {
         }
 
         incomingFrom?.let { from ->
-            Text(text = "يطلب الجهاز $from: ${sourceLabel(incomingSource)}")
+            Text(text = "يطلب $from: ${sourceLabel(incomingSource)}")
             Button(onClick = {
                 val src = incomingSource
                 incomingFrom = null
@@ -328,11 +395,10 @@ fun HomeScreen() {
             }
             Button(onClick = {
                 val src = incomingSource
-                TrustedDevices.grant(from, src)
-                grants = TrustedDevices.list()
+                link.grant(from, src)
                 incomingFrom = null
                 link.send(from, "call_accept")
-                status = "حُفظ إذن ${sourceLabel(src)} للجهاز $from"
+                status = "حُفظ إذن ${sourceLabel(src)} للمستخدم $from"
                 requestAndStart(src)
                 inCall = true
                 fullScreen = true
@@ -349,10 +415,7 @@ fun HomeScreen() {
         }
 
         if (!sharing) {
-            Text(
-                text = "اختر المصدر الذي تشاركه",
-                modifier = Modifier.padding(top = 8.dp)
-            )
+            Text(text = "اختر المصدر الذي تشاركه", modifier = Modifier.padding(top = 8.dp))
             Button(onClick = { requestAndStart(SRC_SCREEN) }) {
                 Text("مشاركة الشاشة")
             }
@@ -382,38 +445,29 @@ fun HomeScreen() {
 
         OutlinedTextField(
             value = targetId,
-            onValueChange = { input -> targetId = input.filter { it.isDigit() }.take(6) },
-            label = { Text("معرّف الجهاز الآخر") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            onValueChange = { input -> targetId = input.filter { it.isDigit() || it.isLetter() || it == '_' }.take(20) },
+            label = { Text("اسم المستخدم الآخر") },
             singleLine = true,
             modifier = Modifier.padding(top = 8.dp)
         )
 
-        Text(text = "اطلب من الجهاز الآخر:", modifier = Modifier.padding(top = 8.dp))
+        Text(text = "اطلب من المستخدم الآخر:", modifier = Modifier.padding(top = 8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            Button(onClick = { requestCall(link, deviceId, targetId, SRC_FRONT) { status = it } }) {
+            Button(onClick = { link.requestCall(targetId, SRC_FRONT) { status = it } }) {
                 Text("طلب أمامية")
             }
-            Button(onClick = { requestCall(link, deviceId, targetId, SRC_BACK) { status = it } }) {
+            Button(onClick = { link.requestCall(targetId, SRC_BACK) { status = it } }) {
                 Text("طلب خلفية")
             }
-            Button(onClick = { requestCall(link, deviceId, targetId, SRC_SCREEN) { status = it } }) {
+            Button(onClick = { link.requestCall(targetId, SRC_SCREEN) { status = it } }) {
                 Text("طلب شاشة")
             }
         }
 
-        Button(onClick = {
-            if (!WebRtcManager.sendText("مرحباً من $deviceId")) {
-                rtcState = "القناة غير مفتوحة بعد"
-            }
-        }) {
-            Text("إرسال رسالة تجريبية")
-        }
-
-        Text(text = "الأجهزة الموثوقة", modifier = Modifier.padding(top = 12.dp))
+        Text(text = "الأذونات المحفوظة", modifier = Modifier.padding(top = 12.dp))
         if (grants.isEmpty()) {
             Text(text = "لا توجد أذونات محفوظة")
         } else {
@@ -424,33 +478,36 @@ fun HomeScreen() {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(text = "$id: ${sourceLabel(src)}")
-                    Button(onClick = {
-                        TrustedDevices.revoke(id, src)
-                        grants = TrustedDevices.list()
-                    }) {
+                    Button(onClick = { link.revoke(id, src) }) {
                         Text("حذف")
                     }
                 }
             }
-            Button(onClick = {
-                TrustedDevices.revokeAll()
-                grants = TrustedDevices.list()
-            }) {
+            Button(onClick = { link.revokeAll() }) {
                 Text("حذف الكل")
             }
+        }
+
+        Button(onClick = onLogout, modifier = Modifier.padding(top = 12.dp)) {
+            Text("تسجيل الخروج")
         }
     }
 }
 
-class ServerLink(
-    private val deviceId: String,
-    private val onStatus: (String) -> Unit,
-    private val onIncoming: (String, String) -> Unit,
-    private val onCallResult: (String, Boolean) -> Unit
-) {
+// يدير الاتصال بالخادم: الحسابات والأذونات والإشارات
+class ServerLink {
     private val main = Handler(Looper.getMainLooper())
     private var socket: WebSocketClient? = null
     private var running = false
+    private var currentUser: String? = null
+    private var currentPass: String? = null
+
+    var onStatus: (String) -> Unit = {}
+    var onGrants: (List<Pair<String, String>>) -> Unit = {}
+    var onIncoming: (String, String) -> Unit = { _, _ -> }
+    var onCallResult: (String, Boolean) -> Unit = { _, _ -> }
+    var onLoginResult: (Boolean, String?, String?) -> Unit = { _, _, _ -> }
+    var onSignupResult: (Boolean, String?) -> Unit = { _, _ -> }
 
     fun start() {
         running = true
@@ -466,30 +523,78 @@ class ServerLink(
 
     fun isConnected(): Boolean = socket?.isOpen == true
 
+    fun signup(user: String, pass: String) {
+        sendJson(JSONObject().put("type", "signup").put("username", user).put("password", pass))
+    }
+
+    fun login(user: String, pass: String) {
+        currentUser = user
+        currentPass = pass
+        if (isConnected()) {
+            sendLogin()
+        }
+    }
+
+    fun logout() {
+        currentUser = null
+        currentPass = null
+    }
+
+    fun grant(trusted: String, src: String) {
+        sendJson(JSONObject().put("type", "grant").put("trusted", trusted).put("source", src))
+    }
+
+    fun revoke(trusted: String, src: String) {
+        sendJson(JSONObject().put("type", "revoke").put("trusted", trusted).put("source", src))
+    }
+
+    fun revokeAll() {
+        sendJson(JSONObject().put("type", "revoke_all"))
+    }
+
+    fun requestCall(targetRaw: String, src: String, onMsg: (String) -> Unit) {
+        val target = targetRaw.trim()
+        if (target.isEmpty()) {
+            onMsg("أدخل اسم المستخدم الآخر أولاً")
+            return
+        }
+        if (target == currentUser) {
+            onMsg("لا يمكن الاتصال بنفس الحساب")
+            return
+        }
+        if (!isConnected()) {
+            onMsg("غير متصل بالخادم")
+            return
+        }
+        sendRaw(target, JSONObject().put("kind", "call_request").put("src", src))
+        onMsg("أُرسل طلب ${sourceLabel(src)} إلى $target")
+    }
+
     fun send(to: String, kind: String) {
         sendRaw(to, JSONObject().put("kind", kind))
     }
 
-    fun sendRequest(to: String, src: String) {
-        sendRaw(to, JSONObject().put("kind", "call_request").put("src", src))
+    private fun sendLogin() {
+        val u = currentUser ?: return
+        val p = currentPass ?: return
+        sendJson(JSONObject().put("type", "login").put("username", u).put("password", p))
+    }
+
+    private fun sendJson(obj: JSONObject) {
+        val s = socket ?: return
+        if (s.isOpen) s.send(obj.toString())
     }
 
     private fun sendRaw(to: String, data: JSONObject) {
-        val s = socket ?: return
-        if (!s.isOpen) return
-        val payload = JSONObject()
-            .put("type", "signal")
-            .put("to", to)
-            .put("data", data)
-        s.send(payload.toString())
+        sendJson(JSONObject().put("type", "signal").put("to", to).put("data", data))
     }
 
     private fun open() {
         if (!running) return
         val s = object : WebSocketClient(URI(SERVER_URL)) {
             override fun onOpen(handshake: ServerHandshake?) {
-                send(JSONObject().put("type", "register").put("id", deviceId).toString())
                 main.post { onStatus("متصل بالخادم") }
+                if (currentUser != null) sendLogin()
             }
 
             override fun onMessage(message: String?) {
@@ -525,20 +630,55 @@ class ServerLink(
         } catch (e: Exception) {
             return
         }
-        if (json.optString("type") != "signal") return
-        val from = json.optString("from")
-        val data = json.optJSONObject("data") ?: return
-        when (data.optString("kind")) {
-            "sdp", "ice" -> WebRtcManager.handleSignal(from, data)
-            "call_request" -> {
-                val src = data.optString("src", SRC_SCREEN)
-                main.post { onIncoming(from, src) }
+        when (json.optString("type")) {
+            "signup_result" -> {
+                val ok = json.optBoolean("ok", false)
+                val err = json.optString("error", null)
+                main.post { onSignupResult(ok, err) }
             }
-            "call_accept" -> {
-                WebRtcManager.startAsCaller(from)
-                main.post { onCallResult(from, true) }
+            "login_result" -> {
+                val ok = json.optBoolean("ok", false)
+                val id = if (ok) json.optString("id") else null
+                val err = if (!ok) json.optString("error", null) else null
+                val list = mutableListOf<Pair<String, String>>()
+                if (ok) {
+                    val arr: JSONArray = json.optJSONArray("grants") ?: JSONArray()
+                    for (i in 0 until arr.length()) {
+                        val g = arr.getJSONObject(i)
+                        list.add(g.getString("trusted_id") to g.getString("source"))
+                    }
+                }
+                main.post {
+                    onGrants(list)
+                    onLoginResult(ok, id, err)
+                }
             }
-            "call_reject" -> main.post { onCallResult(from, false) }
+            "grants" -> {
+                val arr = json.optJSONArray("grants") ?: JSONArray()
+                val list = mutableListOf<Pair<String, String>>()
+                for (i in 0 until arr.length()) {
+                    val g = arr.getJSONObject(i)
+                    list.add(g.getString("trusted_id") to g.getString("source"))
+                }
+                main.post { onGrants(list) }
+            }
+            "signal" -> {
+                val from = json.optString("from")
+                val data = json.optJSONObject("data") ?: return
+                when (data.optString("kind")) {
+                    "sdp", "ice" -> WebRtcManager.handleSignal(from, data)
+                    "call_request" -> {
+                        val src = data.optString("src", SRC_SCREEN)
+                        main.post { onIncoming(from, src) }
+                    }
+                    "call_accept" -> {
+                        WebRtcManager.startAsCaller(from)
+                        main.post { onCallResult(from, true) }
+                    }
+                    "call_reject" -> main.post { onCallResult(from, false) }
+                }
+            }
+            "error" -> main.post { onStatus(json.optString("message")) }
         }
     }
 }
