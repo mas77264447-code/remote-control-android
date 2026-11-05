@@ -6,7 +6,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 
 class ScreenShareService : Service() {
@@ -25,11 +27,27 @@ class ScreenShareService : Service() {
         }
 
         val mode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_SCREEN
-        startForeground(NOTIFICATION_ID, buildNotification(mode))
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification(mode))
+        } catch (e: Exception) {
+            report("فشل تشغيل الخدمة: ${e.javaClass.simpleName}: ${e.message}")
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         if (mode == MODE_CAMERA) {
             val front = intent?.getBooleanExtra(EXTRA_FRONT, true) ?: true
-            if (!WebRtcManager.startCamera(this, front)) {
+            try {
+                val ok = WebRtcManager.startCamera(this, front)
+                if (!ok) {
+                    report("تعذّر تشغيل الكاميرا، تحقق من الإذن أو من وجود الكاميرا")
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                } else {
+                    report("الكاميرا بدأت بنجاح")
+                }
+            } catch (e: Exception) {
+                report("خطأ في الكاميرا: ${e.javaClass.simpleName}: ${e.message}")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -45,11 +63,16 @@ class ScreenShareService : Service() {
             if (data != null) {
                 WebRtcManager.startScreen(this, data)
             } else {
+                report("لم تصل بيانات إذن الشاشة")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
         }
         return START_NOT_STICKY
+    }
+
+    private fun report(msg: String) {
+        Handler(Looper.getMainLooper()).post { WebRtcManager.onState?.invoke(msg) }
     }
 
     override fun onDestroy() {
