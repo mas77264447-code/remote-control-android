@@ -7,12 +7,14 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import org.json.JSONObject
 
 class ScreenShareService : Service() {
 
@@ -23,6 +25,7 @@ class ScreenShareService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            pendingAcceptTo = null
             WebRtcManager.stopScreen()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -31,36 +34,31 @@ class ScreenShareService : Service() {
 
         val mode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_SCREEN
 
-        // الكاميرا تحتاج إذنها قبل أن تُعلن الخدمة نوعها، وإلا يرفض النظام التشغيل
         if (mode == MODE_CAMERA &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
         ) {
             report("إذن الكاميرا غير ممنوح، اضغط الزر بعد منحه")
-            stopSelf()
+            fail()
             return START_NOT_STICKY
         }
 
         try {
-            startForeground(NOTIFICATION_ID, buildNotification(mode))
+            startForegroundFor(mode)
         } catch (e: Exception) {
             report("تعذّر بدء الخدمة: ${e.javaClass.simpleName}")
-            stopSelf()
+            fail()
             return START_NOT_STICKY
         }
 
-        if (mode == MODE_CAMERA) {
+        val ok = if (mode == MODE_CAMERA) {
             val front = intent?.getBooleanExtra(EXTRA_FRONT, true) ?: true
-            val ok = try {
-                WebRtcManager.startCamera(this, front)
+            try {
+                val started = WebRtcManager.startCamera(this, front)
+                if (started) report("الكاميرا بدأت بنجاح")
+                started
             } catch (e: Exception) {
                 report("خطأ في الكاميرا: ${e.javaClass.simpleName}")
                 false
-            }
-            if (!ok) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            } else {
-                report("الكاميرا بدأت بنجاح")
             }
         } else {
             val data: Intent? = intent?.let {
@@ -71,15 +69,58 @@ class ScreenShareService : Service() {
                     it.getParcelableExtra(EXTRA_DATA)
                 }
             }
-            if (data != null) {
-                WebRtcManager.startScreen(this, data)
-            } else {
+            if (data == null) {
                 report("لم تصل بيانات إذن الشاشة")
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                false
+            } else {
+                try {
+                    WebRtcManager.startScreen(this, data)
+                    report("الشاشة تُلتقط للبث")
+                    true
+                } catch (e: Exception) {
+                    report("خطأ في التقاط الشاشة: ${e.javaClass.simpleName}")
+                    false
+                }
             }
         }
+
+        if (!ok) {
+            fail()
+            return START_NOT_STICKY
+        }
+
+        // الآن فقط نُعلم الطرف الآخر بالموافقة، لأن مسار الفيديو صار جاهزاً
+        sendPendingAccept()
         return START_NOT_STICKY
+    }
+
+    private fun startForegroundFor(mode: String) {
+        val notification = buildNotification(mode)
+        if (Build.VERSION.SDK_INT >= 29) {
+            val type = if (mode == MODE_CAMERA) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            startForeground(NOTIFICATION_ID, notification, type)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun sendPendingAccept() {
+        val to = pendingAcceptTo ?: return
+        pendingAcceptTo = null
+        val sender = WebRtcManager.sender ?: return
+        Handler(Looper.getMainLooper()).post {
+            sender(to, JSONObject().put("kind", "call_accept"))
+        }
+    }
+
+    private fun fail() {
+        pendingAcceptTo = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun report(msg: String) {
@@ -124,5 +165,9 @@ class ScreenShareService : Service() {
         const val ACTION_STOP = "com.example.remotecontrol.STOP"
         const val MODE_SCREEN = "screen"
         const val MODE_CAMERA = "camera"
+
+        // الطرف الذي ينتظر موافقتنا بعد أن يبدأ البث: "اسم_المستخدم/معرّف_الجهاز"
+        @Volatile
+        var pendingAcceptTo: String? = null
     }
 }

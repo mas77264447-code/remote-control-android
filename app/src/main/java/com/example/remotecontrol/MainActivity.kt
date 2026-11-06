@@ -45,7 +45,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
-import org.json.JSONArray
 import org.json.JSONObject
 import org.webrtc.SurfaceViewRenderer
 import java.net.URI
@@ -290,6 +289,7 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
             sharing = true
             captureInfo = "الشاشة تُلتقط للبث"
         } else {
+            ScreenShareService.pendingAcceptTo = null
             status = "لم يُمنح إذن التقاط الشاشة"
         }
         pendingSource = ""
@@ -303,6 +303,7 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
         if (granted && src.isNotEmpty()) {
             startSource(context, src, { sharing = it }, { captureInfo = it }, projectionLauncher) { pendingSource = it }
         } else {
+            ScreenShareService.pendingAcceptTo = null
             status = "لم يُمنح إذن الكاميرا"
         }
     }
@@ -319,6 +320,7 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
 
     fun requestAndStart(src: String) {
         if (sharing) {
+            ScreenShareService.pendingAcceptTo = null
             status = "البث يعمل بالفعل، أوقفه أولاً"
             return
         }
@@ -391,7 +393,8 @@ fun HomeScreen(username: String, link: ServerLink, onLogout: () -> Unit) {
             Text(text = "يطلب $from: ${sourceLabel(incomingSource)}")
             Button(onClick = {
                 val src = incomingSource
-                link.send(from, incomingDevice, "call_accept")
+                // لا نرسل القبول الآن: الخدمة تُرسله بعد أن يصبح الفيديو جاهزاً
+                ScreenShareService.pendingAcceptTo = "$from/$incomingDevice"
                 incomingFrom = null
                 status = "وافقت على طلب $from"
                 requestAndStart(src)
