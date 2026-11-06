@@ -50,16 +50,19 @@ class ScreenShareService : Service() {
             return START_NOT_STICKY
         }
 
-        val ok = if (mode == MODE_CAMERA) {
-            val front = intent?.getBooleanExtra(EXTRA_FRONT, true) ?: true
-            try {
-                val started = WebRtcManager.startCamera(this, front)
-                if (started) report("الكاميرا بدأت بنجاح")
-                started
-            } catch (e: Exception) {
-                report("خطأ في الكاميرا: ${e.javaClass.simpleName}")
-                false
+        // النتيجة تأتي بعد أن يبدأ المصدر فعلاً، بدون تجميد الواجهة
+        val onResult: (Boolean) -> Unit = { ok ->
+            if (ok) {
+                report(if (mode == MODE_CAMERA) "الكاميرا بدأت بنجاح" else "الشاشة تُلتقط للبث")
+                sendPendingAccept()
+            } else {
+                fail()
             }
+        }
+
+        if (mode == MODE_CAMERA) {
+            val front = intent?.getBooleanExtra(EXTRA_FRONT, true) ?: true
+            WebRtcManager.startCamera(this, front, onResult)
         } else {
             val data: Intent? = intent?.let {
                 if (Build.VERSION.SDK_INT >= 33) {
@@ -71,26 +74,11 @@ class ScreenShareService : Service() {
             }
             if (data == null) {
                 report("لم تصل بيانات إذن الشاشة")
-                false
+                fail()
             } else {
-                try {
-                    WebRtcManager.startScreen(this, data)
-                    report("الشاشة تُلتقط للبث")
-                    true
-                } catch (e: Exception) {
-                    report("خطأ في التقاط الشاشة: ${e.javaClass.simpleName}")
-                    false
-                }
+                WebRtcManager.startScreen(this, data, onResult)
             }
         }
-
-        if (!ok) {
-            fail()
-            return START_NOT_STICKY
-        }
-
-        // الآن فقط نُعلم الطرف الآخر بالموافقة، لأن مسار الفيديو صار جاهزاً
-        sendPendingAccept()
         return START_NOT_STICKY
     }
 
@@ -166,7 +154,6 @@ class ScreenShareService : Service() {
         const val MODE_SCREEN = "screen"
         const val MODE_CAMERA = "camera"
 
-        // الطرف الذي ينتظر موافقتنا بعد أن يبدأ البث: "اسم_المستخدم/معرّف_الجهاز"
         @Volatile
         var pendingAcceptTo: String? = null
     }

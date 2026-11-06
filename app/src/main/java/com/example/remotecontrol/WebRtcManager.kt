@@ -28,6 +28,7 @@ import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import java.nio.ByteBuffer
+import java.util.concurrent.Executors
 
 private class Sdp(
     private val onCreated: (SessionDescription) -> Unit = {},
@@ -58,24 +59,29 @@ object WebRtcManager {
     var onScreenStopped: (() -> Unit)? = null
 
     private val main = Handler(Looper.getMainLooper())
+
+    // كل العمليات الثقيلة تتم في هذا الخيط، لا في الخيط الرئيسي
+    private val worker = Executors.newSingleThreadExecutor()
+
     private var eglBase: EglBase? = null
     private var factory: PeerConnectionFactory? = null
-    private var pc: PeerConnection? = null
-    private var channel: DataChannel? = null
-    private var remote: String = ""
-    private var iceReady = false
-    private var remoteSet = false
+
+    @Volatile private var pc: PeerConnection? = null
+    @Volatile private var channel: DataChannel? = null
+    @Volatile private var remote = ""
+    @Volatile private var iceReady = false
+    @Volatile private var remoteSet = false
     private val pendingOutIce = mutableListOf<JSONObject>()
     private val pendingInIce = mutableListOf<IceCandidate>()
 
     private var localSource: VideoSource? = null
-    private var localTrack: VideoTrack? = null
+    @Volatile private var localTrack: VideoTrack? = null
     private var localCapturer: VideoCapturer? = null
     private var localHelper: SurfaceTextureHelper? = null
-    private var remoteTrack: VideoTrack? = null
-    private var remoteRenderer: SurfaceViewRenderer? = null
 
-    val isSharing: Boolean get() = localCapturer != null
+    // تُلمس من الخيط الرئيسي فقط
+    private var remoteTrack: VideoTrack? = null
+    @Volatile private var remoteRenderer: SurfaceViewRenderer? = null
 
     fun init(context: Context) {
         if (factory != null) return
@@ -91,60 +97,98 @@ object WebRtcManager {
             .createPeerConnectionFactory()
     }
 
-    // يبدأ التقاط الشاشة بدقتها الكاملة
-    fun startScreen(context: Context, data: Intent) {
-        init(context)
-        stopScreen()
-        val egl = eglBase ?: return
-        val f = factory ?: return
-        val helper = SurfaceTextureHelper.create("ScreenCapture", egl.eglBaseContext)
-        val source = f.createVideoSource(true)
-        val capturer = ScreenCapturerAndroid(data, object : MediaProjection.Callback() {
-            override fun onStop() {
-                stopScreen()
-                main.post { onScreenStopped?.invoke() }
+    private fun onWorker(block: () -> Unit) {
+        worker.execute {
+            try {
+                block()
+            } catch (e: Exception) {
+                report("خطأ WebRTC: ${e.javaClass.simpleName}: ${e.message}")
             }
-        })
-        capturer.initialize(helper, context.applicationContext, source.capturerObserver)
-        val m = context.resources.displayMetrics
-        capturer.startCapture(m.widthPixels, m.heightPixels, 15)
-        localSource = source
-        localTrack = f.createVideoTrack("screen0", source)
-        localCapturer = capturer
-        localHelper = helper
+        }
     }
 
-    // يبدأ التقاط الكاميرا الأمامية أو الخلفية حسب اختيار المستخدم
-    fun startCamera(context: Context, front: Boolean): Boolean {
-        init(context)
-        stopScreen()
+    private fun report(msg: String) {
+        main.post { onState?.invoke(msg) }
+    }
+
+    private fun finish(ok: Boolean, onResult: (Boolean) -> Unit) {
+        main.post { onResult(ok) }
+    }
+
+    // يبدأ مصدر الفيديو (شاشة أو كاميرا) ويحفظه كمسار محلي
+    private fun beginCapture(
+        name: String,
+        screen: Boolean,
+        makeCapturer: (VideoSource, SurfaceTextureHelper) -> VideoCapturer?
+    ): Boolean {
         val egl = eglBase ?: return false
         val f = factory ?: return false
-        val enumerator = Camera2Enumerator(context.applicationContext)
-        val name = enumerator.deviceNames.firstOrNull {
-            if (front) enumerator.isFrontFacing(it) else enumerator.isBackFacing(it)
-        }
-        if (name == null) {
-            report("لا توجد كاميرا بهذا الاتجاه")
-            return false
-        }
-        val capturer = enumerator.createCapturer(name, null)
+        stopScreenNow()
+        val helper = SurfaceTextureHelper.create(name, egl.eglBaseContext)
+        val source = f.createVideoSource(screen)
+        val capturer = makeCapturer(source, helper)
         if (capturer == null) {
-            report("تعذّر فتح الكاميرا")
+            helper.dispose()
+            source.dispose()
             return false
         }
-        val helper = SurfaceTextureHelper.create("CameraCapture", egl.eglBaseContext)
-        val source = f.createVideoSource(false)
-        capturer.initialize(helper, context.applicationContext, source.capturerObserver)
-        capturer.startCapture(1280, 720, 30)
         localSource = source
-        localTrack = f.createVideoTrack("camera0", source)
+        localTrack = f.createVideoTrack("${name}0", source)
         localCapturer = capturer
         localHelper = helper
         return true
     }
 
-    fun stopScreen() {
+    fun startScreen(context: Context, data: Intent, onResult: (Boolean) -> Unit) = onWorker {
+        init(context)
+        val ok = try {
+            beginCapture("screen", true) { source, helper ->
+                val capturer = ScreenCapturerAndroid(data, object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        onWorker { stopScreenNow() }
+                        main.post { onScreenStopped?.invoke() }
+                    }
+                })
+                capturer.initialize(helper, context.applicationContext, source.capturerObserver)
+                val m = context.resources.displayMetrics
+                capturer.startCapture(m.widthPixels, m.heightPixels, 15)
+                capturer
+            }
+        } catch (e: Exception) {
+            report("تعذّر التقاط الشاشة: ${e.javaClass.simpleName}")
+            false
+        }
+        finish(ok, onResult)
+    }
+
+    fun startCamera(context: Context, front: Boolean, onResult: (Boolean) -> Unit) = onWorker {
+        init(context)
+        val enumerator = Camera2Enumerator(context.applicationContext)
+        val name = enumerator.deviceNames.firstOrNull {
+            if (front) enumerator.isFrontFacing(it) else enumerator.isBackFacing(it)
+        }
+        val ok = if (name == null) {
+            report("لا توجد كاميرا بهذا الاتجاه")
+            false
+        } else {
+            try {
+                val started = beginCapture("camera", false) { source, helper ->
+                    enumerator.createCapturer(name, null)?.also {
+                        it.initialize(helper, context.applicationContext, source.capturerObserver)
+                        it.startCapture(1280, 720, 30)
+                    }
+                }
+                if (!started) report("تعذّر فتح الكاميرا")
+                started
+            } catch (e: Exception) {
+                report("تعذّر فتح الكاميرا: ${e.javaClass.simpleName}")
+                false
+            }
+        }
+        finish(ok, onResult)
+    }
+
+    private fun stopScreenNow() {
         try {
             localCapturer?.stopCapture()
         } catch (e: Exception) {
@@ -157,6 +201,9 @@ object WebRtcManager {
         localSource = null
     }
 
+    fun stopScreen() = onWorker { stopScreenNow() }
+
+    // يُستدعى من الخيط الرئيسي
     fun attachRenderer(r: SurfaceViewRenderer) {
         val egl = eglBase ?: return
         r.init(egl.eglBaseContext, null)
@@ -172,15 +219,15 @@ object WebRtcManager {
         r.release()
     }
 
-    // يبدأ الاتصال من الجهة التي أرسلت الطلب
-    fun startAsCaller(to: String) {
+    fun startAsCaller(to: String) = onWorker {
         createPc(to)
-        attach(pc!!.createDataChannel("chat", DataChannel.Init()))
-        addVideoForOffer()
-        pc!!.createOffer(
+        val p = pc ?: return@onWorker
+        attach(p.createDataChannel("chat", DataChannel.Init()))
+        addVideoForOffer(p)
+        p.createOffer(
             Sdp(
                 onCreated = { offer ->
-                    pc?.setLocalDescription(Sdp(onError = ::report), offer)
+                    p.setLocalDescription(Sdp(onError = ::report), offer)
                     sendSdp(to, offer)
                     iceReady = true
                     flushOutIce()
@@ -191,23 +238,23 @@ object WebRtcManager {
         )
     }
 
-    // يستقبل رسائل SDP وICE القادمة من الخادم
-    fun handleSignal(from: String, data: JSONObject) {
+    fun handleSignal(from: String, data: JSONObject) = onWorker {
         when (data.optString("kind")) {
             "sdp" -> {
                 val type = SessionDescription.Type.fromCanonicalForm(data.getString("type"))
                 val desc = SessionDescription(type, data.getString("sdp"))
                 if (type == SessionDescription.Type.OFFER) {
                     createPc(from)
-                    pc!!.setRemoteDescription(
+                    val p = pc ?: return@onWorker
+                    p.setRemoteDescription(
                         Sdp(
                             onSet = {
-                                addLocalIfAny()
-                                remoteReady()
-                                pc?.createAnswer(
+                                addLocalIfAny(p)
+                                remoteReady(p)
+                                p.createAnswer(
                                     Sdp(
                                         onCreated = { answer ->
-                                            pc?.setLocalDescription(Sdp(onError = ::report), answer)
+                                            p.setLocalDescription(Sdp(onError = ::report), answer)
                                             sendSdp(from, answer)
                                             iceReady = true
                                             flushOutIce()
@@ -222,8 +269,9 @@ object WebRtcManager {
                         desc
                     )
                 } else {
-                    pc?.setRemoteDescription(
-                        Sdp(onSet = { remoteReady() }, onError = ::report),
+                    val p = pc ?: return@onWorker
+                    p.setRemoteDescription(
+                        Sdp(onSet = { remoteReady(p) }, onError = ::report),
                         desc
                     )
                 }
@@ -234,8 +282,13 @@ object WebRtcManager {
                     data.getInt("sdpMLineIndex"),
                     data.getString("candidate")
                 )
-                if (remoteSet) pc?.addIceCandidate(c) else pendingInIce.add(c)
+                if (remoteSet) {
+                    pc?.addIceCandidate(c)
+                } else {
+                    pendingInIce.add(c)
+                }
             }
+            else -> {}
         }
     }
 
@@ -245,44 +298,33 @@ object WebRtcManager {
         return dc.send(DataChannel.Buffer(ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8)), false))
     }
 
-    fun close() {
+    fun close() = onWorker { closeNow() }
+
+    private fun closeNow() {
         channel?.close()
         channel = null
         pc?.close()
         pc = null
-        remoteRenderer?.let { remoteTrack?.removeSink(it) }
-        remoteTrack = null
         iceReady = false
         remoteSet = false
         pendingOutIce.clear()
         pendingInIce.clear()
-    }
-
-    private fun addVideoForOffer() {
-        val p = pc ?: return
-        val t = localTrack
-        if (t != null) {
-            p.addTrack(t, listOf("screen"))
-        } else {
-            p.addTransceiver(
-                MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
-                RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY)
-            )
+        main.post {
+            val t = remoteTrack
+            val r = remoteRenderer
+            if (t != null && r != null) t.removeSink(r)
+            remoteTrack = null
         }
     }
 
-    private fun addLocalIfAny() {
-        val t = localTrack ?: return
-        pc?.addTrack(t, listOf("screen"))
-    }
-
     private fun createPc(to: String) {
-        close()
+        closeNow()
         remote = to
+        val f = factory ?: return
         val config = PeerConnection.RTCConfiguration(
             listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
         )
-        pc = factory!!.createPeerConnection(config, object : PeerConnection.Observer {
+        pc = f.createPeerConnection(config, object : PeerConnection.Observer {
             override fun onSignalingChange(state: PeerConnection.SignalingState?) {}
 
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
@@ -327,6 +369,23 @@ object WebRtcManager {
         })
     }
 
+    private fun addVideoForOffer(p: PeerConnection) {
+        val t = localTrack
+        if (t != null) {
+            p.addTrack(t, listOf("sharing"))
+        } else {
+            p.addTransceiver(
+                MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
+                RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY)
+            )
+        }
+    }
+
+    private fun addLocalIfAny(p: PeerConnection) {
+        val t = localTrack ?: return
+        p.addTrack(t, listOf("sharing"))
+    }
+
     private fun attach(dc: DataChannel) {
         channel = dc
         dc.registerObserver(object : DataChannel.Observer {
@@ -361,13 +420,9 @@ object WebRtcManager {
         pendingOutIce.clear()
     }
 
-    private fun remoteReady() {
+    private fun remoteReady(p: PeerConnection) {
         remoteSet = true
-        pendingInIce.forEach { pc?.addIceCandidate(it) }
+        pendingInIce.forEach { p.addIceCandidate(it) }
         pendingInIce.clear()
-    }
-
-    private fun report(msg: String) {
-        main.post { onState?.invoke(msg) }
     }
 }
