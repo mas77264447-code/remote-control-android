@@ -84,6 +84,7 @@ object WebRtcManager {
     @Volatile private var remoteRenderer: SurfaceViewRenderer? = null
 
     fun init(context: Context) {
+        CrashLog.install(context)
         if (factory != null) return
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(context.applicationContext)
